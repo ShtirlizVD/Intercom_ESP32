@@ -8,13 +8,15 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1923;color:#e0e0e0;padding:16px;min-height:100vh}
 .container{max-width:480px;margin:0 auto}
-h1{text-align:center;color:#00d4ff;margin-bottom:16px;font-size:1.5em}
-.subtitle{text-align:center;color:#666;margin-bottom:20px;font-size:0.85em}
-.status{text-align:center;padding:12px;border-radius:8px;margin-bottom:16px;font-weight:600}
+h1{text-align:center;color:#00d4ff;margin-bottom:8px;font-size:1.5em}
+.subtitle{text-align:center;color:#666;margin-bottom:16px;font-size:0.85em}
+.status{text-align:center;padding:14px;border-radius:8px;margin-bottom:12px;font-weight:600;font-size:1em}
 .status.ok{background:#1b4332;color:#52b788}
 .status.err{background:#3d0c02;color:#e63946}
-.status.call{background:#4a1942;color:#e056a0}
-.status.ring{background:#433402;color:#e0c020}
+.status.tx{background:#2d1b4e;color:#c084fc}
+.status.rx{background:#1b3342;color:#60d0f0}
+.status.duplex{background:#1b4332;color:#52b788}
+.ptt-hint{text-align:center;color:#888;font-size:0.8em;margin-bottom:16px}
 .card{background:#16213e;border-radius:10px;padding:16px;margin-bottom:12px;border:1px solid #1a3050}
 .card h2{color:#00d4ff;margin-bottom:12px;font-size:1.1em}
 label{display:block;margin-bottom:4px;color:#8899aa;font-size:0.85em;margin-top:8px}
@@ -36,26 +38,39 @@ button:active{transform:scale(0.98)}
 .net:hover{background:#1a2a3a}
 .net .ssid{font-weight:600;font-size:0.9em}
 .net .info{color:#666;font-size:0.75em}
-.net .lock{color:#e07b00;margin-left:6px}
 .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.85em}
 .info-grid span{color:#666}
 .info-grid strong{color:#a0c0e0}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:12px 24px;border-radius:8px;opacity:0;transition:opacity 0.3s;z-index:100;font-size:0.9em}
 .toast.show{opacity:1}
 .range-val{color:#00d4ff;font-weight:600}
+.legend{display:flex;gap:12px;justify-content:center;margin:8px 0;flex-wrap:wrap}
+.legend span{font-size:0.75em;padding:3px 8px;border-radius:4px}
+.legend .l-idle{background:#1a2a3a;color:#888}
+.legend .l-tx{background:#2d1b4e;color:#c084fc}
+.legend .l-rx{background:#1b3342;color:#60d0f0}
+.legend .l-dup{background:#1b4332;color:#52b788}
 </style>
 </head>
 <body>
 <div class="container">
-<h1>📞 ESP32 Intercom</h1>
-<div class="subtitle">Полнодуплексный интерком по Wi-Fi</div>
+<h1>📻 ESP32 Intercom v2</h1>
+<div class="subtitle">Walkie-Talkie: нажал кнопку — говоришь</div>
+
 <div id="status" class="status err">Инициализация...</div>
+<div class="ptt-hint">Удерживайте кнопку для передачи. Оба нажали = дуплекс.</div>
+<div class="legend">
+  <span class="l-idle">Ожидание</span>
+  <span class="l-tx">Передача</span>
+  <span class="l-rx">Приём</span>
+  <span class="l-dup">Дуплекс</span>
+</div>
 
 <div class="card">
-<h2>📡 Wi-Fi подключение</h2>
+<h2>📡 Wi-Fi</h2>
 <button onclick="scanWiFi()">🔍 Найти сети</button>
 <div id="wifi-list"></div>
-<label>SSID (имя сети)</label>
+<label>SSID</label>
 <input type="text" id="ssid" placeholder="Введите или выберите выше">
 <label>Пароль</label>
 <input type="password" id="pass" placeholder="Пароль Wi-Fi">
@@ -69,15 +84,10 @@ button:active{transform:scale(0.98)}
 <h2>⚙️ Устройство</h2>
 <label>Имя устройства</label>
 <input type="text" id="devname" placeholder="ESP32-Intercom">
-<label>Режим кнопки</label>
-<select id="btnmode">
-<option value="0">📞 Телефон (полнодуплекс)</option>
-<option value="1">🎙️ Push-to-Talk</option>
-</select>
 </div>
 
 <div class="card">
-<h2>📞 Интерком</h2>
+<h2>📻 Интерком</h2>
 <label>IP удалённого устройства</label>
 <input type="text" id="remoteip" placeholder="192.168.1.100">
 <div class="btn-row">
@@ -105,19 +115,22 @@ button:active{transform:scale(0.98)}
 <input type="range" id="mgain" min="0" max="10" value="5" oninput="document.getElementById('mgain-val').textContent=this.value">
 <label>Громкость динамика: <span class="range-val" id="svol-val">7</span>/10</label>
 <input type="range" id="svol" min="0" max="10" value="7" oninput="document.getElementById('svol-val').textContent=this.value">
+<div class="btn-row">
+<button class="btn-ok" onclick="testAudio()">🔔 Тест динамика</button>
+</div>
 </div>
 
 <div class="card">
 <h2>🔧 Управление</h2>
 <button class="btn-ok" onclick="saveConfig()">💾 Сохранить настройки</button>
 <div class="btn-row">
-<button class="btn-danger" onclick="reboot()">🔁 Перезагрузить ESP32</button>
-<button class="btn-danger" onclick="factoryReset()">⚠️ Сброс настроек</button>
+<button class="btn-danger" onclick="reboot()">🔁 Перезагрузить</button>
+<button class="btn-danger" onclick="factoryReset()">⚠️ Сброс</button>
 </div>
 </div>
 
 <div class="card">
-<h2>ℹ️ Информация об устройстве</h2>
+<h2>ℹ️ Информация</h2>
 <div class="info-grid" id="info"></div>
 </div>
 </div>
@@ -125,11 +138,9 @@ button:active{transform:scale(0.98)}
 <div class="toast" id="toast"></div>
 
 <script>
-var lastStatus='';
-
-function toast(msg){
+function toast(m){
   var t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
+  t.textContent=m;t.classList.add('show');
   setTimeout(function(){t.classList.remove('show')},3000);
 }
 
@@ -150,7 +161,6 @@ function loadConfig(){
     if(d.error){toast('Ошибка: '+d.error);return;}
     document.getElementById('ssid').value=d.wifi_ssid||'';
     document.getElementById('devname').value=d.device_name||'';
-    document.getElementById('btnmode').value=d.button_mode||'0';
     document.getElementById('remoteip').value=d.remote_ip||'';
     document.getElementById('ctrlport').value=d.ctrl_port||8080;
     document.getElementById('audioport').value=d.audio_port||8081;
@@ -165,36 +175,43 @@ function loadConfig(){
 function updateStatus(){
   api('GET','/api/status',{},function(d){
     var el=document.getElementById('status');
-    if(d.wifi_connected){
-      el.className='status ok';
-      el.textContent='\u2705 Wi-Fi: '+d.wifi_ssid+' | IP: '+d.ip;
-    }else if(d.ap_mode){
-      el.className='status err';
-      el.textContent='\uD83D\uDD34 Режим точки доступа: '+d.ap_ssid;
-    }else{
-      el.className='status err';
-      el.textContent='\u274C Не подключён к Wi-Fi';
-    }
-    var cs=d.call_state||'IDLE';
-    if(cs==='IN_CALL'){
-      el.className='status call';
-      el.textContent='\uD83D\uDFE2 Разговор ('+d.call_duration_sec+' сек)';
-    }else if(cs==='RINGING_IN'){
-      el.className='status ring';
-      el.textContent='\uD83D\uDCDE Входящий вызов';
-    }else if(cs==='RINGING_OUT'){
-      el.className='status ring';
-      el.textContent='\uD83D\uDCDE Вызов...';
-    }
-    lastStatus=cs;
+    var cs=d.com_state||0;
 
+    // WiFi статус
+    var wifi='';
+    if(d.wifi_connected){
+      wifi=d.wifi_ssid+' | '+d.ip;
+    }else if(d.ap_mode){
+      wifi='AP: '+d.ap_ssid;
+    }else{
+      wifi='Не подключён';
+    }
+
+    // Состояние рации
+    if(cs===3){
+      el.className='status duplex';
+      el.textContent='\uD83D\uDD0A ДУПЛЕКС — оба говорят';
+    }else if(cs===1){
+      el.className='status tx';
+      el.textContent='\uD83C\uDFA4 Передача ('+d.tx_duration_sec+' сек)';
+    }else if(cs===2){
+      el.className='status rx';
+      el.textContent='\uD83D\uDD0A Приём — собеседник говорит';
+    }else{
+      el.className='status ok';
+      el.textContent='\u2705 '+wifi;
+    }
+
+    // Info
     document.getElementById('info').innerHTML=
       '<span>MAC:</span><strong>'+(d.mac||'-')+'</strong>'+
       '<span>IP:</span><strong>'+(d.ip||'-')+'</strong>'+
       '<span>Шлюз:</span><strong>'+(d.gateway||'-')+'</strong>'+
       '<span>RSSI:</span><strong>'+(d.rssi||'-')+' dBm</strong>'+
-      '<span>Вызов:</span><strong>'+(d.call_state_name||'Ожидание')+'</strong>'+
-      '<span>Свободно:</span><strong>'+(d.free_heap||'-')+' KB</strong>';
+      '<span>Рация:</span><strong>'+(d.com_state_name||'Ожидание')+'</strong>'+
+      '<span>Heap:</span><strong>'+(d.free_heap||'-')+' KB</strong>'+
+      '<span>Передаю:</span><strong>'+(d.am_transmitting?'Да':'Нет')+'</strong>'+
+      '<span>Собеседник:</span><strong>'+(d.remote_active?'Говорит':'Молчит')+'</strong>';
   });
 }
 
@@ -207,9 +224,8 @@ function scanWiFi(){
       el.innerHTML='<p>Сети не найдены</p>';return;
     }
     el.innerHTML=d.networks.map(function(n){
-      var lock=n.secured?'\uD83D\uDD12':'';
       return '<div class="net" onclick="selNet(\''+n.ssid.replace(/'/g,"\\'")+'\')">'+
-        '<span class="ssid">'+n.ssid+' '+lock+'</span>'+
+        '<span class="ssid">'+n.ssid+(n.secured?' \uD83D\uDD12':'')+'</span>'+
         '<span class="info">'+n.rssi+' dBm | Ch.'+n.channel+'</span></div>';
     }).join('');
   });
@@ -221,17 +237,16 @@ function connectWiFi(){
   var s=document.getElementById('ssid').value;
   var p=document.getElementById('pass').value;
   if(!s){toast('Введите SSID!');return;}
-  toast('Подключение к '+s+'...');
+  toast('Подключение...');
   api('POST','/api/wifi/connect',{ssid:s,password:p},function(d){
     if(d.ok)toast('Подключено! IP: '+d.ip);
     else toast('Ошибка: '+(d.error||''));
-    setTimeout(updateStatus,3000);
   });
 }
 
 function disconnectWiFi(){
-  api('POST','/api/wifi/disconnect',{},function(d){
-    toast('Отключено от Wi-Fi');
+  api('POST','/api/wifi/disconnect',{},function(){
+    toast('Отключено');
     setTimeout(updateStatus,1000);
   });
 }
@@ -239,7 +254,6 @@ function disconnectWiFi(){
 function saveConfig(){
   var c={
     device_name:document.getElementById('devname').value,
-    button_mode:parseInt(document.getElementById('btnmode').value),
     remote_ip:document.getElementById('remoteip').value,
     ctrl_port:parseInt(document.getElementById('ctrlport').value),
     audio_port:parseInt(document.getElementById('audioport').value),
@@ -248,8 +262,16 @@ function saveConfig(){
     spk_volume:parseInt(document.getElementById('svol').value)
   };
   api('POST','/api/config',c,function(d){
-    if(d.ok)toast('Настройки сохранены!');
+    if(d.ok)toast('Сохранено!');
     else toast('Ошибка: '+(d.error||''));
+  });
+}
+
+function testAudio(){
+  toast('Тест динамика...');
+  api('POST','/api/test-audio',{},function(d){
+    if(d.ok)toast(d.message||'Готово');
+    else toast('Ошибка');
   });
 }
 
@@ -259,13 +281,13 @@ function reboot(){
 }
 
 function factoryReset(){
-  if(!confirm('Сбросить ВСЕ настройки? Устройство перезагрузится.'))return;
-  api('POST','/api/factory-reset',{},function(){toast('Сброс... перезагрузка');});
+  if(!confirm('Сбросить ВСЕ настройки?'))return;
+  api('POST','/api/factory-reset',{},function(){toast('Сброс...');});
 }
 
 loadConfig();
 updateStatus();
-setInterval(updateStatus,3000);
+setInterval(updateStatus,2000);
 </script>
 </body>
 </html>

@@ -1,8 +1,16 @@
 /*
- * intercom.cpp - Реализация модуля интеркома
+ * intercom.cpp - Реализация модуля интеркома (логика рации)
  *
- * Управляет состоянием вызова, обработкой управляющих сообщений
- * и передачей/приёмом аудио по UDP.
+ * Принцип:
+ *   - Кнопка нажата → сразу передаём аудио по UDP
+ *   - Кнопка отпущена → перестаём передавать
+ *   - Входящие аудио-пакеты ВСЕГДА воспроизводятся
+ *   - Если оба нажали — работают одновременно (дуплекс)
+ *
+ * Управляющие сообщения tx_on/tx_off служат для:
+ *   1. LED индикации на удалённом устройстве
+ *   2. Таймаутов и проверки связи
+ *   3. Мьютинга динамика когда никто не говорит
  */
 
 #include "intercom.h"
@@ -11,179 +19,193 @@
 #include "pins.h"
 #include <Arduino.h>
 
-// Статические члены
+// ==================== Статические члены ====================
 WiFiUDP Intercom::ctrlUdp;
 WiFiUDP Intercom::audioUdp;
-CallState Intercom::state = CallState::IDLE;
+
+volatile bool Intercom::pttDown = false;
+bool Intercom::remoteTx = false;
+uint32_t Intercom::remoteTxTimeout = 0;
+uint32_t Intercom::remoteTxLastSeen = 0;
+uint32_t Intercom::txStartTime = 0;
 uint16_t Intercom::sendSeqNum = 0;
-uint32_t Intercom::callStartTime = 0;
-uint32_t Intercom::lastPacketTime = 0;
-uint32_t Intercom::lastRingTime = 0;
-bool Intercom::pttActive = false;
-uint32_t Intercom::ringRepeatTimer = 0;
+
+uint32_t Intercom::lastPingSent = 0;
+uint32_t Intercom::lastPongReceived = 0;
+bool Intercom::peerOnline = false;
+
+ComState Intercom::state = ComState::IDLE;
 char Intercom::ctrlBuf[256];
-char Intercom::lastCallerName[33] = {0};
+
+// Таймауты
+#define REMOTE_TX_TIMEOUT_MS     500    // Если нет аудио/tx_off от собеседника 500 мс — считаем что он перестал
+#define PING_INTERVAL_MS         5000   // Пинг каждые 5 сек
+#define PEER_ONLINE_TIMEOUT_MS   15000  // Если нет ответа 15 сек — собеседник оффлайн
+
+
+// ==================== Инициализация ====================
 
 bool Intercom::init() {
     DeviceConfig& cfg = Config::get();
 
-    // Открываем UDP сокет для управляющих сообщений
     if (!ctrlUdp.begin(cfg.ctrl_port)) {
         Serial.printf("[INTERCOM] Ошибка открытия ctrl UDP порта %u\n", cfg.ctrl_port);
         return false;
     }
-
-    // Открываем UDP сокет для аудио
     if (!audioUdp.begin(cfg.audio_port)) {
         Serial.printf("[INTERCOM] Ошибка открытия audio UDP порта %u\n", cfg.audio_port);
         ctrlUdp.stop();
         return false;
     }
 
-    state = CallState::IDLE;
+    state = ComState::IDLE;
+    pttDown = false;
+    remoteTx = false;
+    peerOnline = false;
     sendSeqNum = 0;
-    Serial.printf("[INTERCOM] UDP сокеты открыты (ctrl=%u, audio=%u)\n",
+
+    Serial.printf("[INTERCOM] UDP готов (ctrl=%u, audio=%u) — режим рации\n",
                   cfg.ctrl_port, cfg.audio_port);
     return true;
 }
 
 void Intercom::deinit() {
-    endCall();
+    if (pttDown) pttRelease();
     ctrlUdp.stop();
     audioUdp.stop();
 }
 
+
+// ==================== Кнопка PTT ====================
+
+void Intercom::pttPress() {
+    if (!Config::hasRemote()) {
+        Serial.println("[INTERCOM] Удалённый IP не задан!");
+        return;
+    }
+
+    if (pttDown) return;  // Уже нажата
+    pttDown = true;
+    txStartTime = millis();
+    sendSeqNum = 0;
+
+    sendCtrlMessage(MSG_TX_ON);
+    updateState();
+    Serial.println("[INTERCOM] 🎤 PTT ON — начинаю передачу");
+}
+
+void Intercom::pttRelease() {
+    if (!pttDown) return;  // Уже отпущена
+    pttDown = false;
+
+    sendCtrlMessage(MSG_TX_OFF);
+    updateState();
+    Serial.println("[INTERCOM] 🔇 PTT OFF — передача прекращена");
+}
+
+
+// ==================== Главный цикл ====================
+
 void Intercom::update() {
     processCtrlPacket();
+    updateState();
     updateLED();
 
     uint32_t now = millis();
 
-    switch (state) {
-        case CallState::IDLE:
-            // Ничего не делаем
-            break;
+    // Таймаут: если собеседник давно не присылал данные — считаем что перестал
+    if (remoteTx && (now - remoteTxLastSeen > REMOTE_TX_TIMEOUT_MS)) {
+        remoteTx = false;
+        updateState();
+    }
 
-        case CallState::RINGING_OUT:
-            // Повторяем кольцо каждые 2 секунды
-            if (now - ringRepeatTimer >= 2000) {
-                ringRepeatTimer = now;
-                sendCtrlMessage(MSG_RING);
-                Serial.println("[INTERCOM] Отправка кольца...");
-            }
-            // Таймаут вызова
-            if (now - callStartTime > RING_TIMEOUT_MS) {
-                Serial.println("[INTERCOM] Таймаут вызова, возврат в IDLE");
-                state = CallState::IDLE;
-            }
-            break;
+    // Периодический пинг для проверки связи
+    if (now - lastPingSent > PING_INTERVAL_MS && Config::hasRemote()) {
+        lastPingSent = now;
+        sendCtrlMessage(MSG_PING);
+    }
 
-        case CallState::RINGING_IN:
-            // Таймаут входящего вызова
-            if (now - lastRingTime > RING_TIMEOUT_MS) {
-                Serial.println("[INTERCOM] Входящий вызов просрочен");
-                state = CallState::IDLE;
-                memset(lastCallerName, 0, sizeof(lastCallerName));
-            }
-            break;
-
-        case CallState::IN_CALL:
-            // Отправляем пинг каждые 3 секунды
-            if (now - ringRepeatTimer >= 3000) {
-                ringRepeatTimer = now;
-                sendCtrlMessage(MSG_PING);
-            }
-            // Таймаут отсутствия пакетов
-            if (now - lastPacketTime > CALL_TIMEOUT_MS) {
-                Serial.println("[INTERCOM] Таймаут разговора (нет пакетов)");
-                state = CallState::IDLE;
-                Audio::silenceSpeaker();  // Очистить буфер динамика
-            }
-            break;
+    // Таймаут проверки he's online
+    if (peerOnline && (now - lastPongReceived > PEER_ONLINE_TIMEOUT_MS)) {
+        peerOnline = false;
     }
 }
 
-void Intercom::startCall() {
-    if (!Config::hasRemote()) {
-        Serial.println("[INTERCOM] Не задан IP удалённого устройства!");
-        return;
-    }
 
-    if (state == CallState::IN_CALL) {
-        // Нажатие во время разговора = завершить
-        endCall();
-        return;
-    }
+// ==================== Состояние ====================
 
-    if (state != CallState::IDLE) {
-        // Если уже звоним или входящий звонок — сбросить
-        rejectCall();
-        return;
-    }
-
-    state = CallState::RINGING_OUT;
-    callStartTime = millis();
-    lastPacketTime = millis();
-    ringRepeatTimer = millis();
-    sendCtrlMessage(MSG_RING);
-    Serial.printf("[INTERCOM] Исходящий вызов → %s\n", Config::get().remote_ip);
-}
-
-void Intercom::answerCall() {
-    if (state == CallState::RINGING_IN) {
-        state = CallState::IN_CALL;
-        callStartTime = millis();
-        lastPacketTime = millis();
-        ringRepeatTimer = millis();
-        sendCtrlMessage(MSG_ANSWER);
-        sendSeqNum = 0;
-        Serial.printf("[INTERCOM] Вызов принят, разговор с %s\n", lastCallerName);
+void Intercom::updateState() {
+    if (pttDown && remoteTx) {
+        state = ComState::DUPLEX;
+    } else if (pttDown) {
+        state = ComState::TRANSMITTING;
+    } else if (remoteTx) {
+        state = ComState::RECEIVING;
+    } else {
+        state = ComState::IDLE;
     }
 }
 
-void Intercom::endCall() {
-    if (state != CallState::IDLE) {
-        sendCtrlMessage(MSG_HANGUP);
-        Serial.printf("[INTERCOM] Вызов завершён (длительность: %lu мс)\n",
-                      getCallDuration());
-    }
-    state = CallState::IDLE;
-    memset(lastCallerName, 0, sizeof(lastCallerName));
-    pttActive = false;
-}
-
-void Intercom::rejectCall() {
-    if (state == CallState::RINGING_IN) {
-        sendCtrlMessage(MSG_BUSY);
-        Serial.println("[INTERCOM] Вызов отклонён");
-    }
-    state = CallState::IDLE;
-    memset(lastCallerName, 0, sizeof(lastCallerName));
-}
-
-CallState Intercom::getState() {
+ComState Intercom::getState() {
     return state;
-}
-
-bool Intercom::isCallActive() {
-    return state == CallState::IN_CALL;
 }
 
 const char* Intercom::getStateName() {
     switch (state) {
-        case CallState::IDLE:        return "Ожидание";
-        case CallState::RINGING_OUT: return "Вызов...";
-        case CallState::RINGING_IN:  return "Входящий вызов";
-        case CallState::IN_CALL:     return "Разговор";
-        default:                     return "Неизвестно";
+        case ComState::IDLE:         return "Ожидание";
+        case ComState::TRANSMITTING: return "Передача (PTT)";
+        case ComState::RECEIVING:    return "Приём";
+        case ComState::DUPLEX:       return "Дуплекс";
+        default:                     return "?";
     }
 }
 
-uint32_t Intercom::getCallDuration() {
-    if (state == CallState::IN_CALL || state == CallState::RINGING_OUT) {
-        return millis() - callStartTime;
+bool Intercom::amTransmitting() {
+    return pttDown;
+}
+
+bool Intercom::remoteActive() {
+    return remoteTx;
+}
+
+bool Intercom::isDuplex() {
+    return pttDown && remoteTx;
+}
+
+uint32_t Intercom::getTxDuration() {
+    if (pttDown && txStartTime > 0) {
+        return millis() - txStartTime;
     }
     return 0;
+}
+
+uint32_t Intercom::getSessionUptime() {
+    if (peerOnline) {
+        return (millis() - lastPongReceived) / 1000;
+    }
+    return 0;
+}
+
+
+// ==================== Аудио ====================
+
+bool Intercom::canTransmit() {
+    return pttDown && Config::hasRemote();
+}
+
+bool Intercom::shouldPlay() {
+    // Воспроизводить если собеседник активен
+    // В режиме передачи (PTT только мой) — можно мьютить динамик,
+    // чтобы не было эха от собственного голоса через собеседника
+    if (remoteTx) {
+        if (pttDown) {
+            // Дуплекс: оба нажали — воспроизводим (эхо возможен, но это ожидаемо)
+            return true;
+        }
+        // Только собеседник передаёт — воспроизводим
+        return true;
+    }
+    return false;
 }
 
 int Intercom::sendAudio(const int16_t* samples, int count) {
@@ -191,10 +213,9 @@ int Intercom::sendAudio(const int16_t* samples, int count) {
 
     DeviceConfig& cfg = Config::get();
 
-    // Формируем пакет: заголовок + данные
     AudioPacketHeader hdr;
     hdr.seq = sendSeqNum++;
-    hdr.timestamp = millis() - callStartTime;
+    hdr.timestamp = millis() - txStartTime;
 
     audioUdp.beginPacket(cfg.remote_ip, cfg.audio_port);
     audioUdp.write((uint8_t*)&hdr, sizeof(hdr));
@@ -205,7 +226,7 @@ int Intercom::sendAudio(const int16_t* samples, int count) {
 }
 
 int Intercom::receiveAudio(int16_t* buffer, int maxSamples) {
-    if (state != CallState::IN_CALL) return 0;
+    if (!Config::hasRemote()) return 0;
 
     int avail = audioUdp.parsePacket();
     if (avail <= 0) return 0;
@@ -218,62 +239,41 @@ int Intercom::receiveAudio(int16_t* buffer, int maxSamples) {
     }
     audioUdp.read((uint8_t*)&hdr, sizeof(hdr));
 
-    // Обновляем время последнего полученного пакета
-    lastPacketTime = millis();
+    // Обновляем время последнего полученного аудио
+    remoteTxLastSeen = millis();
+    if (!remoteTx) {
+        remoteTx = true;
+        updateState();
+    }
 
     // Читаем аудио данные
-    int bytesToRead = min(avail - sizeof(hdr), maxSamples * sizeof(int16_t));
+    int bytesToRead = min(avail - (int)sizeof(hdr), maxSamples * (int)sizeof(int16_t));
     if (bytesToRead <= 0) return 0;
 
     int bytesRead = audioUdp.read((uint8_t*)buffer, bytesToRead);
     return bytesRead / sizeof(int16_t);
 }
 
-bool Intercom::isPTTActive() {
-    return pttActive;
-}
-
-void Intercom::setPTTActive(bool active) {
-    pttActive = active;
-}
-
 const char* Intercom::getRemoteIP() {
     return Config::get().remote_ip;
 }
 
-bool Intercom::canTransmit() {
-    if (state != CallState::IN_CALL) return false;
 
-    // В режиме PTT — передаём только при нажатой кнопке
-    if (Config::get().button_mode == BTN_MODE_PTT) {
-        return pttActive;
-    }
-
-    // В телефонном режиме — всегда передаём (полнодуплекс)
-    return true;
-}
-
-// ==================== Приватные методы ====================
+// ==================== Управляющие сообщения ====================
 
 void Intercom::processCtrlPacket() {
     int packetSize = ctrlUdp.parsePacket();
     if (packetSize <= 0) return;
 
-    // Ограничиваем размер буфера
     int len = min(packetSize, (int)sizeof(ctrlBuf) - 1);
     int readLen = ctrlUdp.read((uint8_t*)ctrlBuf, len);
     if (readLen <= 0) return;
     ctrlBuf[readLen] = '\0';
 
-    // Сохраняем IP отправителя для возможного ответа
-    // String senderIP = ctrlUdp.remoteIP().toString();
-
-    // Парсим простое JSON-подобное сообщение
-    // Формат: {"t":"<type>","f":"<from_name>"}
+    // Простой парсер JSON: {"t":"<type>","f":"<name>"}
     char type[16] = {0};
     char from[33] = {0};
 
-    // Простой парсер (без ArduinoJson для управляющих сообщений — быстрее)
     char* p;
     p = strstr(ctrlBuf, "\"t\"");
     if (p) {
@@ -286,62 +286,36 @@ void Intercom::processCtrlPacket() {
         if (p) { int i = 0; while (*p && *p != '"' && i < 32) from[i++] = *p++; }
     }
 
-    if (strlen(type) == 0) return;  // Неизвестный формат
+    if (strlen(type) == 0) return;
 
-    // Обработка сообщений
-    if (strcmp(type, "ring") == 0) {
-        // Входящий вызов
-        if (state == CallState::IDLE) {
-            state = CallState::RINGING_IN;
-            lastRingTime = millis();
-            strncpy(lastCallerName, from, sizeof(lastCallerName) - 1);
-            Serial.printf("[INTERCOM] Входящий вызов от: %s\n",
-                          strlen(from) > 0 ? from : "Unknown");
-        } else if (state == CallState::IN_CALL) {
-            // Уже разговариваем — отправляем "занято"
-            sendCtrlMessage(MSG_BUSY);
-        }
-        // Если уже исходящий звонок — игнорируем
+    if (strcmp(type, "tx_on") == 0) {
+        // Собеседник начал передачу
+        remoteTx = true;
+        remoteTxLastSeen = millis();
+        peerOnline = true;
+        lastPongReceived = millis();
+        updateState();
+        Serial.printf("[INTERCOM] 📻 Собеседник передаёт (%s)\n",
+                      strlen(from) > 0 ? from : "?");
     }
-    else if (strcmp(type, "answer") == 0) {
-        // Ответ на наш исходящий вызов
-        if (state == CallState::RINGING_OUT) {
-            state = CallState::IN_CALL;
-            callStartTime = millis();
-            lastPacketTime = millis();
-            ringRepeatTimer = millis();
-            sendSeqNum = 0;
-            Serial.printf("[INTERCOM] Вызов принят! Разговор с %s\n",
-                          strlen(from) > 0 ? from : "Unknown");
-        }
-    }
-    else if (strcmp(type, "hangup") == 0) {
-        if (state != CallState::IDLE) {
-            Serial.printf("[INTERCOM] Собеседник завершил вызов (%s)\n",
-                          strlen(from) > 0 ? from : "Unknown");
-            state = CallState::IDLE;
-            memset(lastCallerName, 0, sizeof(lastCallerName));
-            pttActive = false;
+    else if (strcmp(type, "tx_off") == 0) {
+        // Собеседник прекратил передачу
+        if (remoteTx) {
+            remoteTx = false;
+            updateState();
+            Serial.printf("[INTERCOM] 🔇 Собеседник прекратил (%s)\n",
+                          strlen(from) > 0 ? from : "?");
         }
     }
     else if (strcmp(type, "ping") == 0) {
-        // Отвечаем на пинг
-        if (state == CallState::IN_CALL) {
-            sendCtrlMessage(MSG_PONG);
-            lastPacketTime = millis();
-        }
+        // Собеседник проверяет связь — отвечаем
+        peerOnline = true;
+        lastPongReceived = millis();
+        sendCtrlMessage(MSG_PONG);
     }
     else if (strcmp(type, "pong") == 0) {
-        // Обновляем время последнего пакета
-        if (state == CallState::IN_CALL) {
-            lastPacketTime = millis();
-        }
-    }
-    else if (strcmp(type, "busy") == 0) {
-        if (state == CallState::RINGING_OUT) {
-            Serial.printf("[INTERCOM] Абонент занят\n");
-            state = CallState::IDLE;
-        }
+        peerOnline = true;
+        lastPongReceived = millis();
     }
 }
 
@@ -350,12 +324,10 @@ void Intercom::sendCtrlMessage(CtrlMsgType type) {
 
     const char* typeStr;
     switch (type) {
-        case MSG_RING:   typeStr = "ring";   break;
-        case MSG_ANSWER: typeStr = "answer"; break;
-        case MSG_HANGUP: typeStr = "hangup"; break;
+        case MSG_TX_ON:  typeStr = "tx_on";  break;
+        case MSG_TX_OFF: typeStr = "tx_off"; break;
         case MSG_PING:   typeStr = "ping";   break;
         case MSG_PONG:   typeStr = "pong";   break;
-        case MSG_BUSY:   typeStr = "busy";   break;
         default:         typeStr = "unknown"; break;
     }
 
@@ -369,40 +341,55 @@ void Intercom::sendCtrlMessage(CtrlMsgType type) {
     ctrlUdp.endPacket();
 }
 
+
+// ==================== LED ====================
+
 void Intercom::updateLED() {
     static uint32_t lastBlink = 0;
     static bool ledState = false;
     uint32_t now = millis();
 
     switch (state) {
-        case CallState::IDLE:
-            // LED выключен
-            digitalWrite(LED_PIN, LED_OFF);
+        case ComState::IDLE:
+            // Свободен: короткая вспышка каждые 3 сек если собеседник онлайн,
+            // иначе выключен
+            if (peerOnline) {
+                if (now - lastBlink > 3000 && !ledState) {
+                    lastBlink = now;
+                    ledState = true;
+                    digitalWrite(LED_PIN, LED_ON);
+                } else if (now - lastBlink > 200 && ledState) {
+                    ledState = false;
+                    digitalWrite(LED_PIN, LED_OFF);
+                }
+            } else {
+                digitalWrite(LED_PIN, LED_OFF);
+                ledState = false;
+            }
             break;
 
-        case CallState::RINGING_OUT:
-            // Быстрое мигание (вызов)
-            if (now - lastBlink > 300) {
+        case ComState::TRANSMITTING:
+            // Передаю: быстрое мигание
+            if (now - lastBlink > 150) {
                 lastBlink = now;
                 ledState = !ledState;
                 digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
             }
             break;
 
-        case CallState::RINGING_IN:
-            // Медленное мигание (входящий вызов)
-            if (now - lastBlink > 500) {
+        case ComState::RECEIVING:
+            // Принимаю: плавное мигание (пульсация)
+            if (now - lastBlink > 400) {
                 lastBlink = now;
                 ledState = !ledState;
                 digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
             }
             break;
 
-        case CallState::IN_CALL:
-            // LED горит постоянно
+        case ComState::DUPLEX:
+            // Дуплекс: горит постоянно
             digitalWrite(LED_PIN, LED_ON);
+            ledState = true;
             break;
     }
 }
-
-
