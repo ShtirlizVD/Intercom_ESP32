@@ -1,0 +1,10 @@
+.pio
+.vscode
+.vscode/.cortex-debug.peripherals.json
+.vscode/.cortex-debug.registers.json
+.vscode/launch.json
+.vscode/settings.json
+*.swp
+*.swo
+*~
+.DS_Store
