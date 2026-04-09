@@ -2,6 +2,7 @@
  * webui.cpp - Реализация веб-интерфейса настройки
  *
  * HTTP API + captive portal для начальной настройки WiFi.
+ * Поддерживает WiFi (ESP32) и Ethernet (WT32-ETH01) через условную компиляцию.
  */
 
 #include "webui.h"
@@ -9,15 +10,23 @@
 #include "intercom.h"
 #include "audio.h"
 #include "pins.h"
-#include <WiFi.h>
 #include <ArduinoJson.h>
 #include <LITTLEFS.h>
+#ifdef USE_WIFI
+#include <WiFi.h>
+#endif
+#ifdef USE_ETHERNET
+#include <ETH.h>
+extern bool ethConnected;  // declared in main.cpp
+#endif
 
 // Статические члены
 WebServer* WebUI::server = nullptr;
+#ifdef USE_WIFI
 DNSServer* WebUI::dnsServer = nullptr;
 bool WebUI::apMode = false;
 uint32_t WebUI::apStartTime = 0;
+#endif
 
 // ==================== HTML страница (встроенная в прошивку) ====================
 // Встроенный HTML используется как fallback если файл в LITTLEFS не найден
@@ -89,7 +98,7 @@ button:active{transform:scale(0.98)}
   <span class="l-dup">Дуплекс</span>
 </div>
 
-<div class="card">
+<div class="card" id="wifi-card">
 <h2>📡 Wi-Fi</h2>
 <button onclick="scanWiFi()">🔍 Найти сети</button>
 <div id="wifi-list"></div>
@@ -151,10 +160,11 @@ button:active{transform:scale(0.98)}
 </div>
 <div class="toast" id="toast"></div>
 <script>
+var connType='wifi';
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(function(){t.classList.remove('show')},3000)}
 function api(method,path,body,cb){var x=new XMLHttpRequest();x.open(method,path,true);x.setRequestHeader('Content-Type','application/json');x.onload=function(){try{cb(JSON.parse(x.responseText))}catch(e){cb({error:x.responseText})}};x.onerror=function(){cb({error:'Ошибка сети'})};if(body)x.send(JSON.stringify(body));else x.send()}
-function loadConfig(){api('GET','/api/config',{},function(d){if(d.error){toast('Ошибка');return}document.getElementById('ssid').value=d.wifi_ssid||'';document.getElementById('devname').value=d.device_name||'';document.getElementById('remoteip').value=d.remote_ip||'';document.getElementById('ctrlport').value=d.ctrl_port||8080;document.getElementById('audioport').value=d.audio_port||8081;document.getElementById('samplerate').value=d.sample_rate||16000;document.getElementById('mgain').value=d.mic_gain||5;document.getElementById('mgain-val').textContent=d.mic_gain||5;document.getElementById('svol').value=d.spk_volume||7;document.getElementById('svol-val').textContent=d.spk_volume||7})}
-function updateStatus(){api('GET','/api/status',{},function(d){var el=document.getElementById('status');var cs=d.com_state||0;var wifi='';if(d.wifi_connected)wifi=d.wifi_ssid+' | '+d.ip;else if(d.ap_mode)wifi='AP: '+d.ap_ssid;else wifi='Не подключён';if(cs===3){el.className='status duplex';el.textContent='\uD83D\uDD0A ДУПЛЕКС — оба говорят'}else if(cs===1){el.className='status tx';el.textContent='\uD83C\uDFA4 Передача ('+d.tx_duration_sec+' сек)'}else if(cs===2){el.className='status rx';el.textContent='\uD83D\uDD0A Приём — собеседник говорит'}else{el.className='status ok';el.textContent='\u2705 '+wifi}document.getElementById('info').innerHTML='<span>MAC:</span><strong>'+(d.mac||'-')+'</strong>'+'<span>IP:</span><strong>'+(d.ip||'-')+'</strong>'+'<span>Шлюз:</span><strong>'+(d.gateway||'-')+'</strong>'+'<span>RSSI:</span><strong>'+(d.rssi||'-')+' dBm</strong>'+'<span>Рация:</span><strong>'+(d.com_state_name||'Ожидание')+'</strong>'+'<span>Heap:</span><strong>'+(d.free_heap||'-')+' KB</strong>'+'<span>Передаю:</span><strong>'+(d.am_transmitting?'Да':'Нет')+'</strong>'+'<span>Собеседник:</span><strong>'+(d.remote_active?'Говорит':'Молчит')+'</strong>'})}
+function loadConfig(){api('GET','/api/config',{},function(d){if(d.error){toast('Ошибка');return}var ssidEl=document.getElementById('ssid');if(ssidEl)ssidEl.value=d.wifi_ssid||'';document.getElementById('devname').value=d.device_name||'';document.getElementById('remoteip').value=d.remote_ip||'';document.getElementById('ctrlport').value=d.ctrl_port||8080;document.getElementById('audioport').value=d.audio_port||8081;document.getElementById('samplerate').value=d.sample_rate||16000;document.getElementById('mgain').value=d.mic_gain||5;document.getElementById('mgain-val').textContent=d.mic_gain||5;document.getElementById('svol').value=d.spk_volume||7;document.getElementById('svol-val').textContent=d.spk_volume||7})}
+function updateStatus(){api('GET','/api/status',{},function(d){connType=d.connection_type||'wifi';var wifiCard=document.getElementById('wifi-card');if(wifiCard)wifiCard.style.display=(connType==='ethernet')?'none':'block';var el=document.getElementById('status');var cs=d.com_state||0;if(connType==='ethernet'){if(!d.connected){el.className='status err';el.textContent='Ethernet не подключён'}else if(cs===3){el.className='status duplex';el.textContent='\uD83D\uDD0A ДУПЛЕКС — оба говорят'}else if(cs===1){el.className='status tx';el.textContent='\uD83C\uDFA4 Передача ('+d.tx_duration_sec+' сек)'}else if(cs===2){el.className='status rx';el.textContent='\uD83D\uDD0A Приём — собеседник говорит'}else{el.className='status ok';el.textContent='\u2705 Ethernet | '+d.ip}}else{var wifi='';if(d.wifi_connected)wifi=d.wifi_ssid+' | '+d.ip;else if(d.ap_mode)wifi='AP: '+d.ap_ssid;else wifi='Не подключён';if(cs===3){el.className='status duplex';el.textContent='\uD83D\uDD0A ДУПЛЕКС — оба говорят'}else if(cs===1){el.className='status tx';el.textContent='\uD83C\uDFA4 Передача ('+d.tx_duration_sec+' сек)'}else if(cs===2){el.className='status rx';el.textContent='\uD83D\uDD0A Приём — собеседник говорит'}else{el.className='status ok';el.textContent='\u2705 '+wifi}}var infoHtml='<span>Тип:</span><strong>'+(connType==='ethernet'?'Ethernet':'Wi-Fi')+'</strong>'+'<span>MAC:</span><strong>'+(d.mac||'-')+'</strong>'+'<span>IP:</span><strong>'+(d.ip||'-')+'</strong>'+'<span>Шлюз:</span><strong>'+(d.gateway||'-')+'</strong>';if(connType!=='ethernet'){infoHtml+='<span>RSSI:</span><strong>'+(d.rssi!=null&&d.rssi>=0?(d.rssi===-1?'N/A':d.rssi+' dBm'):(d.rssi||'-')+' dBm')+'</strong>'}infoHtml+='<span>Рация:</span><strong>'+(d.com_state_name||'Ожидание')+'</strong>'+'<span>Heap:</span><strong>'+(d.free_heap||'-')+' KB</strong>'+'<span>Передаю:</span><strong>'+(d.am_transmitting?'Да':'Нет')+'</strong>'+'<span>Собеседник:</span><strong>'+(d.remote_active?'Говорит':'Молчит')+'</strong>';document.getElementById('info').innerHTML=infoHtml})}
 function scanWiFi(){document.getElementById('wifi-list').innerHTML='<p>Сканирование...</p>';api('POST','/api/wifi/scan',{},function(d){if(d.error){toast('Ошибка');return}var el=document.getElementById('wifi-list');if(!d.networks||d.networks.length===0){el.innerHTML='<p>Сети не найдены</p>';return}el.innerHTML=d.networks.map(function(n){return '<div class="net" onclick="selNet(\''+n.ssid.replace(/'/g,"\\'")+'\')"><span class="ssid">'+n.ssid+(n.secured?' \uD83D\uDD12':'')+'</span><span class="info">'+n.rssi+' dBm | Ch.'+n.channel+'</span></div>'}).join('')})}
 function selNet(s){document.getElementById('ssid').value=s}
 function connectWiFi(){var s=document.getElementById('ssid').value;var p=document.getElementById('pass').value;if(!s){toast('Введите SSID!');return}toast('Подключение...');api('POST','/api/wifi/connect',{ssid:s,password:p},function(d){if(d.ok)toast('Подключено! IP: '+d.ip);else toast('Ошибка')})}
@@ -185,12 +195,14 @@ void WebUI::init() {
     server->on("/api/status", HTTP_GET, handleAPIStatus);
     server->on("/api/config", HTTP_GET, handleAPIGetConfig);
     server->on("/api/config", HTTP_POST, handleAPISetConfig);
+#ifdef USE_WIFI
     server->on("/api/wifi/scan", HTTP_POST, handleAPIWiFiScan);
     server->on("/api/wifi/connect", HTTP_POST, handleAPIWiFiConnect);
     server->on("/api/wifi/disconnect", HTTP_POST, [](WebServer& s) {
         WiFi.disconnect(true);
         WebUI::sendJSON(200, "{\"ok\":true}");
     });
+#endif
     server->on("/api/test-audio", HTTP_POST, [](WebServer& s) {
         // Тестовый сигнал на динамик
         int16_t testTone[160];
@@ -219,11 +231,16 @@ void WebUI::handleClient() {
     if (server) {
         server->handleClient();
     }
+#ifdef USE_WIFI
     if (dnsServer && apMode) {
         dnsServer->processNextRequest();
     }
+#endif
 }
 
+// ==================== WiFi функции (только при USE_WIFI) ====================
+
+#ifdef USE_WIFI
 void WebUI::startAP() {
     DeviceConfig& cfg = Config::get();
 
@@ -302,6 +319,7 @@ bool WebUI::startSTA() {
 bool WebUI::isAPMode() {
     return apMode;
 }
+#endif // USE_WIFI
 
 // ==================== Обработчики ====================
 
@@ -325,17 +343,24 @@ void WebUI::handleIndexHTML() {
 
 void WebUI::handleAPIStatus() {
     JsonDocument doc;
-    doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+
+#ifdef USE_ETHERNET
+    doc["connection_type"] = "ethernet";
+    doc["connected"] = ethConnected;
+    doc["ip"] = ethConnected ? ETH.localIP().toString() : "0.0.0.0";
+    doc["mac"] = ETH.macAddress();
+    doc["rssi"] = -1;
+    doc["gateway"] = ETH.gatewayIP().toString();
+    doc["subnet"] = ETH.subnetMask().toString();
+#else
+    doc["connection_type"] = "wifi";
+    doc["connected"] = (WiFi.status() == WL_CONNECTED);
     doc["ap_mode"] = apMode;
     doc["ip"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
     doc["mac"] = WiFi.macAddress();
     doc["rssi"] = WiFi.RSSI();
     doc["gateway"] = apMode ? "0.0.0.0" : WiFi.gatewayIP().toString();
     doc["subnet"] = apMode ? "255.255.255.0" : WiFi.subnetMask().toString();
-    doc["free_heap"] = ESP.getFreeHeap() / 1024;
-    doc["uptime"] = millis() / 1000;
-
-    // WiFi info
     if (apMode) {
         doc["ap_ssid"] = String(AP_SSID_PREFIX) + "_" + Config::get().device_name;
         doc["wifi_ssid"] = "";
@@ -343,6 +368,10 @@ void WebUI::handleAPIStatus() {
         doc["ap_ssid"] = "";
         doc["wifi_ssid"] = WiFi.SSID();
     }
+#endif
+
+    doc["free_heap"] = ESP.getFreeHeap() / 1024;
+    doc["uptime"] = millis() / 1000;
 
     // Intercom state (рация)
     doc["com_state"] = (int)Intercom::getState();
@@ -436,6 +465,9 @@ void WebUI::handleAPISetConfig() {
     sendJSON(200, "{\"ok\":true}");
 }
 
+// ==================== WiFi API обработчики (только при USE_WIFI) ====================
+
+#ifdef USE_WIFI
 void WebUI::handleAPIWiFiScan() {
     JsonDocument doc;
     JsonArray networks = doc["networks"].to<JsonArray>();
@@ -486,6 +518,9 @@ void WebUI::handleAPIWiFiConnect() {
     delay(500);
     ESP.restart();
 }
+#endif // USE_WIFI
+
+// ==================== Общие API обработчики ====================
 
 void WebUI::handleAPIReboot() {
     sendJSON(200, "{\"ok\":true,\"message\":\"Rebooting...\"}");
@@ -501,7 +536,8 @@ void WebUI::handleAPIFactoryReset() {
 }
 
 void WebUI::handleNotFound() {
-    // Captive portal detection
+#ifdef USE_WIFI
+    // Captive portal detection — только в WiFi AP режиме
     String host = server->hostHeader();
 
     // Перенаправляем любые запросы на главную страницу
@@ -509,9 +545,10 @@ void WebUI::handleNotFound() {
         // Для captive portal: если запрошен не наш IP — перенаправляем
         server->sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/");
         server->send(302);
-    } else {
-        server->send(404, "text/plain", "Not Found");
+        return;
     }
+#endif
+    server->send(404, "text/plain", "Not Found");
 }
 
 void WebUI::sendJSON(int code, const char* json) {

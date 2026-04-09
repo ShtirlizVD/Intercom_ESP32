@@ -30,11 +30,11 @@ bool Audio::init() {
 
     esp_err_t err;
 
-    // ==================== I2S порт 0: Микрофон (RX) ====================
+    // ==================== I2S порт 0: Микрофон ICS-43434 (RX) ====================
     i2s_config_t i2s_mic_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = currentSampleRate,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // Микрофон выдаёт 32-бит
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // ICS-43434: 24-бит в 32-бит кадре
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,    // Только левый канал
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -137,13 +137,11 @@ int Audio::readFrame(int16_t* buffer, int maxSamples) {
     int samplesRead = bytesRead / sizeof(int32_t);
 
     // Конвертация 32-бит → 16-бит с извлечением данных микрофона
-    // I2S микрофоны SPH0645 передают данные в старших битах 32-битного слова
-    // Фактические данные: 18 бит в позициях [31:14]
+    // ICS-43434 передаёт 24-битные данные в старших битах 32-битного I2S слова.
+    // Данные занимают позиции [31:8], 8 младших бит — мусор.
     for (int i = 0; i < samplesRead; i++) {
-        // Сдвиг на 14 бит для получения 18-битного значения,
-        // затем ограничение до 16 бит
         int32_t raw = rawMicBuffer[i];
-        int32_t sample = raw >> 14;  // Извлекаем 18-битные данные
+        int32_t sample = raw >> 8;  // Извлекаем 24-битные данные
         // Ограничиваем диапазон
         if (sample > 32767) sample = 32767;
         if (sample < -32768) sample = -32768;

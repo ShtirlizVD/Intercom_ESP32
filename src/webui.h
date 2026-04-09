@@ -2,55 +2,50 @@
 /*
  * webui.h - Веб-интерфейс настройки устройства
  *
- * Предоставляет HTTP API и веб-страницу для конфигурации:
- * - Подключение к WiFi
- * - Настройка параметров устройства
- * - Настройка интеркома
- * - Настройка аудио
- * - Состояние устройства
- *
- * В режиме AP (точки доступа) работает как captive portal.
+ * Поддерживает два режима подключения:
+ * - USE_WIFI:     WiFi (STA + AP с captive portal)
+ * - USE_ETHERNET: Ethernet (DHCP, WT32-ETH01)
  */
 
 #include <WebServer.h>
 #include <DNSServer.h>
 
+#ifdef USE_ETHERNET
+#include <ETH.h>
+#endif
+
 class WebUI {
 public:
-    // Инициализация веб-сервера
     static void init();
-
-    // Обработка запросов (вызывать в loop)
     static void handleClient();
 
-    // Запуск в режиме AP (точки доступа для настройки)
+#ifdef USE_WIFI
     static void startAP();
-
-    // Запуск в режиме STA (подключение к WiFi)
     static bool startSTA();
-
-    // Проверка: работает ли AP
     static bool isAPMode();
+#endif
 
 private:
-    // Роуты API
     static void handleRoot();
     static void handleIndexHTML();
     static void handleAPIStatus();
     static void handleAPIGetConfig();
     static void handleAPISetConfig();
-    static void handleAPIWiFiScan();
-    static void handleAPIWiFiConnect();
     static void handleAPIReboot();
     static void handleAPIFactoryReset();
     static void handleNotFound();
-
-    // Вспомогательные
     static void sendJSON(int code, const char* json);
-    static void sendCaptivePortal();
+
+#ifdef USE_WIFI
+    static void handleAPIWiFiScan();
+    static void handleAPIWiFiConnect();
+    static void handleAPISetWiFi();
+#endif
 
     static WebServer* server;
+#ifdef USE_WIFI
     static DNSServer* dnsServer;
     static bool apMode;
     static uint32_t apStartTime;
+#endif
 };
