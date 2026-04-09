@@ -77,6 +77,7 @@ public:
     static bool amTransmitting();    // Моя кнопка нажата?
     static bool remoteActive();      // Собеседник передаёт?
     static bool isDuplex();          // Оба передают?
+    static bool isPeerOnline();      // Собеседник в сети?
     static uint32_t getTxDuration(); // Длительность текущей передачи (мс)
     static uint32_t getSessionUptime(); // Время с последнего tx_on/tx_off от собеседника
 

@@ -1,5 +1,5 @@
 /*
- * main.cpp - ESP32 Intercom firmware v2.1
+ * main.cpp - ESP32 Intercom firmware v2.2
  *
  * Режим рации (Walkie-Talkie):
  *   - Нажал кнопку → речь СРАЗУ передаётся
@@ -98,7 +98,18 @@ void audioReceiveTask(void* param) {
     bool wasPlaying = false;
 
     while (true) {
-        if (Intercom::shouldPlay()) {
+        // Приоритет: тональные сигналы (ошибка, отмена) > входящий аудио-поток
+        if (Audio::isTonePlaying()) {
+            int toneSamples = Audio::getToneFrame(spkBuffer, FRAME_SAMPLES);
+            if (toneSamples > 0) {
+                Audio::writeFrame(spkBuffer, toneSamples);
+                wasPlaying = true;
+            } else {
+                // Сигнал завершился
+                wasPlaying = false;
+                Audio::silenceSpeaker();
+            }
+        } else if (Intercom::shouldPlay()) {
             int samplesRead = Intercom::receiveAudio(spkBuffer, FRAME_SAMPLES);
             if (samplesRead > 0) {
                 Audio::writeFrame(spkBuffer, samplesRead);
@@ -219,7 +230,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n\n========================================");
-    Serial.println("   ESP32 Intercom v2.1");
+    Serial.println("   ESP32 Intercom v2.2");
     Serial.println("   Режим рации (Walkie-Talkie)");
 #ifdef USE_ETHERNET
     Serial.println("   WT32-ETH01 + Ethernet");

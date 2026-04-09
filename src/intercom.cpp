@@ -63,6 +63,8 @@ bool Intercom::init() {
     remoteTx = false;
     peerOnline = false;
     sendSeqNum = 0;
+    lastPingSent = 0;     // Заставим немедленно отправить первый пинг
+    lastPongReceived = 0;
 
     Serial.printf("[INTERCOM] UDP готов (ctrl=%u, audio=%u) — режим рации\n",
                   cfg.ctrl_port, cfg.audio_port);
@@ -89,9 +91,19 @@ void Intercom::pttPress() {
     txStartTime = millis();
     sendSeqNum = 0;
 
+    // Проверяем доступность пира
+    if (!peerOnline) {
+        Audio::playErrorTone();
+        // Отправляем немедленный пинг — если пир на самом деле онлайн,
+        // он ответит и peerOnline обновится для следующего нажатия
+        sendCtrlMessage(MSG_PING);
+        Serial.println("[INTERCOM] ⚠️ PTT ON — пир не в сети! Сигнал ошибки.");
+    } else {
+        Serial.println("[INTERCOM] 🎤 PTT ON — начинаю передачу");
+    }
+
     sendCtrlMessage(MSG_TX_ON);
     updateState();
-    Serial.println("[INTERCOM] 🎤 PTT ON — начинаю передачу");
 }
 
 void Intercom::pttRelease() {
@@ -125,9 +137,14 @@ void Intercom::update() {
         sendCtrlMessage(MSG_PING);
     }
 
-    // Таймаут проверки he's online
+    // Таймаут проверки онлайна
     if (peerOnline && (now - lastPongReceived > PEER_ONLINE_TIMEOUT_MS)) {
         peerOnline = false;
+        // Если я сейчас передаю и пир внезапно оффлайн — сигнал отмены
+        if (pttDown) {
+            Audio::playCancelTone();
+            Serial.println("[INTERCOM] ⚠️ Пир ушёл оффлайн во время передачи!");
+        }
     }
 }
 
@@ -170,6 +187,10 @@ bool Intercom::remoteActive() {
 
 bool Intercom::isDuplex() {
     return pttDown && remoteTx;
+}
+
+bool Intercom::isPeerOnline() {
+    return peerOnline;
 }
 
 uint32_t Intercom::getTxDuration() {
@@ -351,8 +372,7 @@ void Intercom::updateLED() {
 
     switch (state) {
         case ComState::IDLE:
-            // Свободен: короткая вспышка каждые 3 сек если собеседник онлайн,
-            // иначе выключен
+            // Свободен: короткая вспышка каждые 3 сек если собеседник онлайн
             if (peerOnline) {
                 if (now - lastBlink > 3000 && !ledState) {
                     lastBlink = now;
@@ -361,6 +381,26 @@ void Intercom::updateLED() {
                 } else if (now - lastBlink > 200 && ledState) {
                     ledState = false;
                     digitalWrite(LED_PIN, LED_OFF);
+                }
+            } else if (Config::hasRemote()) {
+                // Пир настроен, но оффлайн: двойная вспышка каждые 2 сек
+                static uint8_t blinkCount = 0;
+                if (now - lastBlink > 300) {
+                    lastBlink = now;
+                    if (!ledState) {
+                        blinkCount++;
+                        if (blinkCount > 2) {
+                            blinkCount = 0;
+                            // Длинная пауза после двойной вспышки
+                            lastBlink = now + 1700;
+                        } else {
+                            ledState = true;
+                            digitalWrite(LED_PIN, LED_ON);
+                        }
+                    } else {
+                        ledState = false;
+                        digitalWrite(LED_PIN, LED_OFF);
+                    }
                 }
             } else {
                 digitalWrite(LED_PIN, LED_OFF);

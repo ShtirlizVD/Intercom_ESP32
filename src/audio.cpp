@@ -244,3 +244,145 @@ bool Audio::setSampleRate(uint32_t sampleRate) {
 
     return true;
 }
+
+
+// ==================== Генератор звуковых сигналов ====================
+
+// Статические члены генератора тонов
+volatile Audio::ToneType Audio::toneType = Audio::TONE_NONE;
+Audio::TonePhase Audio::tonePhase = Audio::PHASE_OFF;
+uint16_t Audio::toneFreq = 0;
+uint32_t Audio::tonePhaseStart = 0;
+uint32_t Audio::toneStepIndex = 0;
+const Audio::ToneStep* Audio::toneSequence = nullptr;
+uint32_t Audio::toneSequenceLen = 0;
+uint32_t Audio::toneSamplePhase = 0;
+int16_t Audio::toneVolume = 20000;  // ~60% громкости
+
+// Шаблоны сигналов (частота, длительность_мс)
+// Сигнал ошибки: нисходящий "ду-ду" — пир не в сети
+const Audio::ToneStep Audio::errorSequence[] = {
+    {480,  200},   // "Ду"  — 480 Гц, 200 мс
+    {0,    80},    // Пауза 80 мс
+    {380,  200},   // "Ду"  — 380 Гц, 200 мс
+    {0,    100},   // Пауза
+    {300,  300},   // "Дуу" — 300 Гц, 300 мс (подтверждение)
+};
+
+// Сигнал подтверждения: короткий бип
+const Audio::ToneStep Audio::confirmSequence[] = {
+    {800,  100},   // Короткий высокий бип
+    {0,    50},    // Пауза
+    {1000, 100},   // Ещё один
+};
+
+// Сигнал отмены: три быстрых нисходящих тона
+const Audio::ToneStep Audio::cancelSequence[] = {
+    {600,  120},   // Да
+    {0,    60},    // Пауза
+    {450,  120},   // да
+    {0,    60},    // Пауза
+    {300,  200},   // да!
+};
+
+void Audio::startTone(ToneType type, const ToneStep* seq, uint32_t len) {
+    toneType = type;
+    tonePhase = PHASE_BEEP;
+    toneSequence = seq;
+    toneSequenceLen = len;
+    toneStepIndex = 0;
+    tonePhaseStart = millis();
+    toneSamplePhase = 0;
+    toneFreq = seq[0].freq;
+}
+
+void Audio::playErrorTone() {
+    Serial.println("[AUDIO] 🔔 Сигнал ошибки: пир не в сети");
+    startTone(TONE_ERROR, errorSequence, sizeof(errorSequence) / sizeof(errorSequence[0]));
+}
+
+void Audio::playConfirmTone() {
+    Serial.println("[AUDIO] 🔔 Сигнал подтверждения");
+    startTone(TONE_CONFIRM, confirmSequence, sizeof(confirmSequence) / sizeof(confirmSequence[0]));
+}
+
+void Audio::playCancelTone() {
+    Serial.println("[AUDIO] 🔔 Сигнал отмены: связь потеряна");
+    startTone(TONE_CANCEL, cancelSequence, sizeof(cancelSequence) / sizeof(cancelSequence[0]));
+}
+
+bool Audio::isTonePlaying() {
+    return toneType != TONE_NONE;
+}
+
+void Audio::advanceTonePhase() {
+    toneStepIndex++;
+    if (toneStepIndex >= toneSequenceLen) {
+        // Сигнал завершён
+        toneType = TONE_NONE;
+        tonePhase = PHASE_OFF;
+        toneFreq = 0;
+        return;
+    }
+    tonePhase = (toneSequence[toneStepIndex].freq > 0) ? PHASE_BEEP : PHASE_SILENCE;
+    toneFreq = toneSequence[toneStepIndex].freq;
+    tonePhaseStart = millis();
+    toneSamplePhase = 0;  // Сброс фазы синуса для чистоты
+}
+
+int Audio::getToneFrame(int16_t* buffer, int maxSamples) {
+    if (toneType == TONE_NONE) return 0;
+
+    uint32_t now = millis();
+    uint32_t stepDuration = toneSequence[toneStepIndex].duration_ms;
+    uint32_t elapsed = now - tonePhaseStart;
+    uint32_t remainingMs = (elapsed < stepDuration) ? (stepDuration - elapsed) : 0;
+
+    // Сколько сэмплов осталось до конца текущего шага
+    uint32_t remainingSamples = (uint32_t)currentSampleRate * remainingMs / 1000;
+    int samplesToGen = min(maxSamples, (int)remainingSamples);
+
+    if (samplesToGen <= 0) {
+        // Текущий шаг закончился, переходим к следующему
+        advanceTonePhase();
+        if (toneType == TONE_NONE) return 0;  // Весь сигнал завершён
+        // Генерируем хотя бы немного для нового шага
+        samplesToGen = min(maxSamples, (int)((uint32_t)currentSampleRate * toneSequence[toneStepIndex].duration_ms / 1000));
+        if (samplesToGen <= 0) samplesToGen = maxSamples;  // На всякий случай
+    }
+
+    uint16_t freq = toneFreq;
+
+    if (freq == 0) {
+        // Тишина (пауза)
+        memset(buffer, 0, samplesToGen * sizeof(int16_t));
+    } else {
+        // Генерация синусоиды
+        // phase_increment = (freq * 2^16) / sample_rate  (фиксированная точка Q16.16)
+        uint32_t phaseInc = ((uint32_t)freq << 16) / currentSampleRate;
+
+        for (int i = 0; i < samplesToGen; i++) {
+            // Вычисляем синус через таблицу (быстрая аппроксимация)
+            uint16_t phase = (uint16_t)(toneSamplePhase >> 16);
+            // Таблица синуса: 256 записей (0..65535)
+            // sin(x) ≈ 1 - 2*|x - 0.5| для треугольной волны (чище для маленьких динамиков)
+            // Используем улучшенную аппроксимацию через квадратичную интерполяцию
+            int32_t val;
+            uint8_t p8 = phase >> 8;  // 0..255
+            if (p8 < 64) {
+                val = p8 * 4;  // 0 → 255
+            } else if (p8 < 128) {
+                val = 511 - p8 * 4;  // 255 → 0
+            } else if (p8 < 192) {
+                val = -(p8 * 4 - 767);  // 0 → -255
+            } else {
+                val = p8 * 4 - 1023;  // -255 → 0
+            }
+            // Масштабируем к громкости сигнала
+            buffer[i] = (int16_t)((int32_t)val * toneVolume / 256);
+            toneSamplePhase += phaseInc;
+        }
+    }
+
+    return samplesToGen;
+}
