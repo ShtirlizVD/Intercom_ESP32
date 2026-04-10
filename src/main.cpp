@@ -1,27 +1,29 @@
 /*
- * main.cpp - ESP32 Intercom firmware v2.3
+ * main.cpp - ESP32 Intercom firmware v2.5
  *
- * Режим рации (Walkie-Talkie):
- *   - Нажал кнопку → речь СРАЗУ передаётся
- *   - Отпустил → передача прекращается, слушаешь
- *   - Оба нажали → полнодуплекс
- *   - Пропущенное сообщение → LED мигает, кнопка воспроизведения
+ * Walkie-Talkie mode:
+ *   - Press button -> audio transmitted immediately
+ *   - Release -> stop transmitting, listen
+ *   - Both pressed -> full duplex
+ *   - Missed message -> LED blinks, playback button
  *
- * Две сборки:
- *   USE_WIFI     — ESP32 DevKit + WiFi (дом)
- *   USE_ETHERNET — WT32-ETH01 v1.4 + Ethernet (гараж)
+ * Two builds:
+ *   USE_WIFI     - ESP32 DevKit + WiFi (home)
+ *   USE_ETHERNET - WT32-ETH01 v1.4 + Ethernet (garage)
+ *   USE_SD       - Enable SD card recording (WiFi board only)
  *
- * Микрофон: ICS-43434 (24-бит I2S MEMS)
- * Динамик:  MAX98357A (I2S Class D)
+ * Mic: ICS-43434 (24-bit I2S MEMS)
+ * Speaker: MAX98357A (I2S Class D)
  *
- * Автор: ShtirlizVD
- * Лицензия: MIT
+ * Author: ShtirlizVD
+ * License: MIT
  */
 
 #include <Arduino.h>
 #include "pins.h"
 #include "config.h"
 #include "audio.h"
+#include "recorder.h"
 #include "intercom.h"
 #include "webui.h"
 #include <LittleFS.h>
@@ -33,7 +35,7 @@ static bool ethConnected = false;
 #include <WiFi.h>
 #endif
 
-// ==================== Кнопка PTT ====================
+// ==================== PTT Button ====================
 static volatile bool buttonEvent = false;
 static volatile uint32_t buttonEventTime = 0;
 static bool buttonHeld = false;
@@ -53,19 +55,19 @@ void handleButton() {
         bool isDown = (digitalRead(BUTTON_PIN) == LOW);
         if (isDown && !buttonHeld) {
             buttonHeld = true;
-            // Если есть непрослушанная запись — очищаем при нажатии PTT
-            Audio::clearRecording();
-            Serial.println("[BTN] ▶ Нажата — передаю");
+            // Clear missed recording when PTT pressed
+            Recorder::clearRecording();
+            Serial.println("[BTN] PTT pressed - transmitting");
             Intercom::pttPress();
         } else if (!isDown && buttonHeld) {
             buttonHeld = false;
-            Serial.println("[BTN] ⏹ Отпущена — молчу");
+            Serial.println("[BTN] PTT released");
             Intercom::pttRelease();
         }
     }
 }
 
-// ==================== Кнопка воспроизведения ====================
+// ==================== Playback Button ====================
 static bool playbackLastState = HIGH;
 static uint32_t playbackDebounceTime = 0;
 
@@ -76,24 +78,23 @@ void handlePlaybackButton() {
     bool state = digitalRead(PLAYBACK_PIN);
     if (state == LOW && playbackLastState == HIGH) {
         playbackDebounceTime = now;
-        // Кнопка нажата
-        if (Audio::hasRecording()) {
-            if (!Audio::isPlaybackActive()) {
-                Audio::startPlayback();
-                Serial.printf("[BTN] 🔊 Воспроизведение (%u мс)\n",
-                              Audio::getRecordingDuration());
+        if (Recorder::hasRecording()) {
+            if (!Recorder::isPlaybackActive()) {
+                Recorder::startPlayback();
+                Serial.printf("[BTN] Playback (%u ms, %s)\n",
+                              Recorder::getDuration(),
+                              Recorder::getStorageName());
             }
         } else {
-            // Нет записи — короткий сигнал
-            Serial.println("[BTN] Нет записи для воспроизведения");
+            Serial.println("[BTN] No recording to play");
         }
     }
     playbackLastState = state;
 }
 
-// ==================== Задача: Отправка аудио ====================
+// ==================== Audio Send Task ====================
 void audioSendTask(void* param) {
-    Serial.println("[TASK] Отправка аудио запущена (Core 1)");
+    Serial.println("[TASK] Audio send started (Core 1)");
 
     int16_t micBuffer[FRAME_SAMPLES + 64];
     uint32_t lastSendTime = 0;
@@ -119,15 +120,15 @@ void audioSendTask(void* param) {
     }
 }
 
-// ==================== Задача: Приём аудио ====================
+// ==================== Audio Receive Task ====================
 void audioReceiveTask(void* param) {
-    Serial.println("[TASK] Приём аудио запущен (Core 0)");
+    Serial.println("[TASK] Audio receive started (Core 0)");
 
     int16_t spkBuffer[FRAME_SAMPLES + 64];
     bool wasPlaying = false;
 
     while (true) {
-        // Приоритет: тональные сигналы > воспроизведение записи > входящий аудио-поток
+        // Priority: tones > recording playback > live audio stream
         if (Audio::isTonePlaying()) {
             int toneSamples = Audio::getToneFrame(spkBuffer, FRAME_SAMPLES);
             if (toneSamples > 0) {
@@ -137,25 +138,25 @@ void audioReceiveTask(void* param) {
                 wasPlaying = false;
                 Audio::silenceSpeaker();
             }
-        } else if (Audio::isPlaybackActive()) {
-            // Воспроизведение записанного сообщения
-            int pbSamples = Audio::getPlaybackFrame(spkBuffer, FRAME_SAMPLES);
+        } else if (Recorder::isPlaybackActive()) {
+            // Playing back recorded message
+            int pbSamples = Recorder::getPlaybackFrame(spkBuffer, FRAME_SAMPLES);
             if (pbSamples > 0) {
                 Audio::writeFrame(spkBuffer, pbSamples);
                 wasPlaying = true;
             } else {
-                // Воспроизведение завершено — очистить запись
-                Audio::clearRecording();
+                // Playback finished - clear recording
+                Recorder::clearRecording();
                 Audio::silenceSpeaker();
                 wasPlaying = false;
-                Serial.println("[TASK] Воспроизведение завершено");
+                Serial.println("[TASK] Playback finished");
             }
         } else if (Intercom::shouldPlay()) {
             int samplesRead = Intercom::receiveAudio(spkBuffer, FRAME_SAMPLES);
             if (samplesRead > 0) {
-                // Параллельно записываем в буфер
-                if (Audio::isRecording()) {
-                    Audio::recordSamples(spkBuffer, samplesRead);
+                // Record to buffer/SD in parallel
+                if (Recorder::isRecording()) {
+                    Recorder::recordSamples(spkBuffer, samplesRead);
                 }
                 Audio::writeFrame(spkBuffer, samplesRead);
                 wasPlaying = true;
@@ -172,9 +173,9 @@ void audioReceiveTask(void* param) {
     }
 }
 
-// ==================== Сетевая задача ====================
+// ==================== Network Task ====================
 void networkTask(void* param) {
-    Serial.println("[TASK] Сетевая задача запущена");
+    Serial.println("[TASK] Network task started");
 
     while (true) {
         Intercom::update();
@@ -182,24 +183,26 @@ void networkTask(void* param) {
         handleButton();
         handlePlaybackButton();
 
-        // Статус каждые 30 сек
+        // Status every 30 sec
         static uint32_t lastStatus = 0;
         if (millis() - lastStatus > 30000) {
             lastStatus = millis();
 #ifdef USE_ETHERNET
-            Serial.printf("[STATUS] ETH: %s | Рация: %s | Peer: %s | Heap: %d KB | Rec: %s\n",
-                          ethConnected ? ETH.localIP().toString().c_str() : "нет",
+            Serial.printf("[STATUS] ETH: %s | Radio: %s | Peer: %s | Heap: %d KB | Rec: %s (%s)\n",
+                          ethConnected ? ETH.localIP().toString().c_str() : "no",
                           Intercom::getStateName(),
                           Intercom::remoteActive() ? "ON" : "OFF",
                           ESP.getFreeHeap() / 1024,
-                          Audio::hasRecording() ? "YES" : "no");
+                          Recorder::hasRecording() ? "YES" : "no",
+                          Recorder::getStorageName());
 #else
-            Serial.printf("[STATUS] WiFi: %s | Рация: %s | Peer: %s | Heap: %d KB | Rec: %s\n",
-                          WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "нет",
+            Serial.printf("[STATUS] WiFi: %s | Radio: %s | Peer: %s | Heap: %d KB | Rec: %s (%s)\n",
+                          WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "no",
                           Intercom::getStateName(),
                           Intercom::remoteActive() ? "ON" : "OFF",
                           ESP.getFreeHeap() / 1024,
-                          Audio::hasRecording() ? "YES" : "no");
+                          Recorder::hasRecording() ? "YES" : "no",
+                          Recorder::getStorageName());
 #endif
         }
 
@@ -213,42 +216,41 @@ void networkTask(void* param) {
 static void onEthEvent(WiFiEvent_t event) {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
-            Serial.println("[ETH] Старт");
+            Serial.println("[ETH] Start");
             ETH.setHostname(Config::get().device_name);
             break;
         case ARDUINO_EVENT_ETH_CONNECTED:
-            Serial.println("[ETH] Кабель подключён");
+            Serial.println("[ETH] Cable connected");
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
-            Serial.printf("[ETH] Получен IP: %s\n", ETH.localIP().toString().c_str());
-            Serial.printf("[ETH] Маска: %s | Шлюз: %s\n",
+            Serial.printf("[ETH] Got IP: %s\n", ETH.localIP().toString().c_str());
+            Serial.printf("[ETH] Mask: %s | GW: %s\n",
                           ETH.subnetMask().toString().c_str(),
                           ETH.gatewayIP().toString().c_str());
             ethConnected = true;
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
-            Serial.println("[ETH] Кабель отключён");
+            Serial.println("[ETH] Cable disconnected");
             ethConnected = false;
             break;
         case ARDUINO_EVENT_ETH_STOP:
-            Serial.println("[ETH] Остановлен");
+            Serial.println("[ETH] Stopped");
             ethConnected = false;
             break;
     }
 }
 
 static bool initEthernet() {
-    Serial.println("[SETUP] Запуск Ethernet (WT32-ETH01 v1.4)...");
+    Serial.println("[SETUP] Starting Ethernet (WT32-ETH01 v1.4)...");
     WiFi.onEvent(onEthEvent);
 
     if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_POWER,
                    ETH_MDC_PIN, ETH_MDIO_PIN, ETH_CLK_MODE)) {
-        Serial.println("[ETH] ОШИБКА инициализации!");
+        Serial.println("[ETH] ERROR init!");
         return false;
     }
 
-    // Ждём IP по DHCP
-    Serial.print("[ETH] Ожидание DHCP");
+    Serial.print("[ETH] Waiting for DHCP");
     int attempts = 0;
     while (!ethConnected && attempts < 30) {
         delay(500);
@@ -258,16 +260,15 @@ static bool initEthernet() {
     Serial.println();
 
     if (ethConnected) {
-        // Устанавливаем имя по MAC если дефолтное
         Config::setDefaultName();
         Config::save();
 
-        Serial.printf("[ETH] Подключён! IP: %s\n", ETH.localIP().toString().c_str());
+        Serial.printf("[ETH] Connected! IP: %s\n", ETH.localIP().toString().c_str());
         WebUI::init();
         return true;
     }
 
-    Serial.println("[ETH] Не удалось получить IP по DHCP");
+    Serial.println("[ETH] Failed to get IP via DHCP");
     return false;
 }
 
@@ -278,31 +279,34 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n\n========================================");
-    Serial.println("   ESP32 Intercom v2.3");
-    Serial.println("   Режим рации (Walkie-Talkie)");
+    Serial.println("   ESP32 Intercom v2.5");
+    Serial.println("   Walkie-Talkie mode");
 #ifdef USE_ETHERNET
     Serial.println("   WT32-ETH01 + Ethernet");
 #else
     Serial.println("   ESP32 DevKit + WiFi");
 #endif
-    Serial.println("   Микрофон: ICS-43434 (24-бит)");
-    Serial.println("   Динамик:  MAX98357A");
-    Serial.println("   Запись последнего сообщения");
+    Serial.println("   Mic: ICS-43434 (24-bit)");
+    Serial.println("   Speaker: MAX98357A");
+    Serial.println("   Last message recording");
+#ifdef USE_SD
+    Serial.println("   SD card: enabled");
+#endif
     Serial.println("========================================\n");
 
-    // 1. Файловая система
+    // 1. Filesystem
     if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Ошибка LittleFS");
+        Serial.println("[FS] LittleFS error");
     } else {
         Serial.println("[FS] LittleFS OK");
         if (LittleFS.exists("/index.html")) {
-            Serial.println("[FS] /index.html найден");
+            Serial.println("[FS] /index.html found");
         } else {
-            Serial.println("[FS] /index.html не найден (встроенный)");
+            Serial.println("[FS] /index.html not found (builtin)");
         }
     }
 
-    // 2. Конфигурация
+    // 2. Config
     Config::init();
     DeviceConfig& cfg = Config::get();
 
@@ -317,45 +321,52 @@ void setup() {
     Serial.printf("[I2S]  Mic: BCK=%d WS=%d DIN=%d\n", I2S_MIC_BCK, I2S_MIC_WS, I2S_MIC_DIN);
     Serial.printf("[I2S]  Spk: BCK=%d WS=%d DOUT=%d\n", I2S_SPK_BCK, I2S_SPK_WS, I2S_SPK_DOUT);
 
-    // 4. Аудио
+    // 4. Audio (I2S)
     if (!Audio::init()) {
-        Serial.println("[AUDIO] ОШИБКА I2S!");
+        Serial.println("[AUDIO] I2S ERROR!");
     }
     Audio::setMicGain(cfg.mic_gain);
     Audio::setVolume(cfg.spk_volume);
 
-    // 5. Сеть: Ethernet или WiFi
+    // 5. Recorder (SD or RAM)
+    if (!Recorder::init(cfg.sample_rate)) {
+        Serial.println("[REC] WARNING: Recording not available!");
+    }
+
+    // 6. Network: Ethernet or WiFi
 #ifdef USE_ETHERNET
     initEthernet();
 #else
     if (Config::hasWiFi()) {
         if (!WebUI::startSTA()) {
-            Serial.println("[SETUP] AP режим");
+            Serial.println("[SETUP] AP mode");
         }
     } else {
-        Serial.println("[SETUP] WiFi не настроен → AP режим");
+        Serial.println("[SETUP] WiFi not configured -> AP mode");
         WebUI::startAP();
     }
 #endif
 
-    // 6. UDP интерком
+    // 7. Intercom (UDP)
     if (!Intercom::init()) {
-        Serial.println("[SETUP] ОШИБКА UDP!");
+        Serial.println("[SETUP] UDP ERROR!");
     }
 
-    // 7. FreeRTOS задачи
+    // 8. FreeRTOS tasks
     xTaskCreatePinnedToCore(audioReceiveTask, "AudioRecv", AUDIO_TASK_STACK, NULL, 3, NULL, 0);
     xTaskCreatePinnedToCore(audioSendTask,   "AudioSend",  AUDIO_TASK_STACK, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(networkTask,     "Network",    NET_TASK_STACK,   NULL, 1, NULL, 0);
 
-    // 8. Готово
-    Serial.println("\n[SETUP] Готово!\n");
-    Serial.printf("[SETUP] Имя: %s\n", cfg.device_name);
+    // 9. Ready
+    Serial.println("\n[SETUP] Done!\n");
+    Serial.printf("[SETUP] Name: %s\n", cfg.device_name);
+    Serial.printf("[SETUP] Recorder: %s (max %u sec)\n",
+                  Recorder::getStorageName(), Recorder::getMaxDuration());
     if (Config::hasRemote()) {
-        Serial.printf("[SETUP] Удалённый: %s (ctrl:%u audio:%u)\n",
+        Serial.printf("[SETUP] Remote: %s (ctrl:%u audio:%u)\n",
                       cfg.remote_ip, cfg.ctrl_port, cfg.audio_port);
     } else {
-        Serial.println("[SETUP] Удалённый IP не задан — настройте через веб!");
+        Serial.println("[SETUP] Remote IP not set - configure via web!");
     }
 
     Serial.println("\n========================================");
@@ -363,12 +374,12 @@ void setup() {
     if (ethConnected) {
         Serial.printf("  Ethernet: http://%s\n", ETH.localIP().toString().c_str());
     } else {
-        Serial.println("  Ethernet: НЕ ПОДКЛЮЧЁН");
+        Serial.println("  Ethernet: NOT CONNECTED");
     }
 #else
     if (WebUI::isAPMode()) {
         Serial.printf("  Wi-Fi: %s_%s\n", AP_SSID_PREFIX, cfg.device_name);
-        Serial.printf("  Пароль: %s\n", AP_PASSWORD);
+        Serial.printf("  Password: %s\n", AP_PASSWORD);
         Serial.println("  URL: http://192.168.4.1");
     } else {
         Serial.printf("  URL: http://%s\n", WiFi.localIP().toString().c_str());

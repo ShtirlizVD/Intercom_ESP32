@@ -9,6 +9,7 @@
 #include "config.h"
 #include "intercom.h"
 #include "audio.h"
+#include "recorder.h"
 #include "pins.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -381,6 +382,13 @@ void WebUI::handleAPIStatus() {
     doc["is_duplex"] = Intercom::isDuplex();
     doc["peer_online"] = Intercom::isPeerOnline();
     doc["tx_duration_sec"] = Intercom::getTxDuration() / 1000;
+
+    // Recording info
+    doc["has_recording"] = Recorder::hasRecording();
+    doc["rec_duration_ms"] = Recorder::getDuration();
+    doc["rec_storage"] = Recorder::getStorageName();
+    doc["rec_max_sec"] = Recorder::getMaxDuration();
+    doc["rec_playing"] = Recorder::isPlaybackActive();
 
     String output;
     serializeJson(doc, output);

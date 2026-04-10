@@ -1,12 +1,12 @@
 #pragma once
 /*
- * pins.h - Определение пинов для ESP32 Intercom v2.0
+ * pins.h - Pin definitions for ESP32 Intercom v2.5
  *
- * Две конфигурации:
+ * Two board configs:
  *
- * 1) ESP32 DevKit (USE_WIFI) — дом, подключение по Wi-Fi:
+ * 1) ESP32 DevKit (USE_WIFI) - home, WiFi:
  *
- *    ESP32           ICS-43434 (I2S микрофон)
+ *    ESP32           ICS-43434 (I2S MEMS mic)
  *    GPIO14 (BCK) -> BCLK
  *    GPIO15 (WS)  -> LRCLK
  *    GPIO32 (DIN) <- DOUT
@@ -17,17 +17,25 @@
  *    GPIO27 (WS)  -> LRCLK
  *    GPIO25 (DOUT)-> DIN
  *
- *    GPIO4  — кнопка (внутренняя подтяжка)
- *    GPIO2  — LED
+ *    GPIO4  - PTT button (internal pullup)
+ *    GPIO2  - LED
+ *
+ *    GPIO13 - Playback button (internal pullup)
+ *
+ *    SD card (SPI, optional, requires USE_SD build flag):
+ *    GPIO23 (MOSI) -> SD DI
+ *    GPIO19 (MISO) <- SD DO
+ *    GPIO18 (SCK)  -> SD CLK
+ *    GPIO5  (CS)   -> SD CS
  *
  *
- * 2) WT32-ETH01 v1.4 (USE_ETHERNET) — гараж, подключение по кабелю:
+ * 2) WT32-ETH01 v1.4 (USE_ETHERNET) - garage, Ethernet:
  *
- *    Ethernet (RMII) занимает: 16, 17, 18, 19, 21, 22, 23, 25, 26, 27
+ *    Ethernet (RMII) occupies: 16, 17, 18, 19, 21, 22, 23, 25, 26, 27
  *
- *    Свободные для I2S и периферии: 2, 4, 5, 12, 13, 14, 32, 33, 34, 35
+ *    Free for I2S and peripherals: 2, 4, 5, 12, 13, 14, 32, 33, 34, 35
  *
- *    WT32-ETH01       ICS-43434 (I2S микрофон, I2S_NUM_0)
+ *    WT32-ETH01       ICS-43434 (I2S mic, I2S_NUM_0)
  *    GPIO32 (BCK) -> BCLK
  *    GPIO33 (WS)  -> LRCLK
  *    GPIO34 (DIN) <- DOUT
@@ -37,8 +45,13 @@
  *    GPIO12 (WS)  -> LRCLK
  *    GPIO5  (DOUT)-> DIN
  *
- *    GPIO14 — кнопка
- *    GPIO2  — LED (встроенный синий)
+ *    GPIO14 - PTT button
+ *    GPIO2  - LED (built-in blue)
+ *    GPIO4  - Playback button
+ *
+ *    NOTE: On WT32-ETH01, standard SPI pins (18,19,23) are taken by Ethernet.
+ *    SD card is NOT supported on WT32-ETH01 due to pin conflicts.
+ *    Recording falls back to RAM buffer (~10 sec) on this board.
  */
 
 // ==================================================================
@@ -100,6 +113,16 @@
 #define LED_PIN            2
 #define LED_ON             LOW
 #define LED_OFF            HIGH
+
+// SD card SPI (optional, only on WiFi board, requires USE_SD build flag)
+#ifdef USE_SD
+#define SD_CS              5
+#define SD_MOSI            23
+#define SD_MISO            19
+#define SD_SCK             18
+#endif
+
+// SD card: NOT available on WT32-ETH01 (USE_SD has no effect here)
 
 #endif // USE_ETHERNET
 

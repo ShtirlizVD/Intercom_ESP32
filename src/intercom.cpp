@@ -16,6 +16,7 @@
 #include "intercom.h"
 #include "config.h"
 #include "audio.h"
+#include "recorder.h"
 #include "pins.h"
 #include <Arduino.h>
 
@@ -317,7 +318,7 @@ void Intercom::processCtrlPacket() {
         lastPongReceived = millis();
         updateState();
         // Начинаем запись входящего сообщения
-        Audio::startRecording();
+        Recorder::startRecording();
         Serial.printf("[INTERCOM] 📻 Собеседник передаёт (%s)\n",
                       strlen(from) > 0 ? from : "?");
     }
@@ -326,7 +327,7 @@ void Intercom::processCtrlPacket() {
         if (remoteTx) {
             remoteTx = false;
             // Останавливаем запись — сообщение сохранено для воспроизведения
-            Audio::stopRecording();
+            Recorder::stopRecording();
             updateState();
             Serial.printf("[INTERCOM] 🔇 Собеседник прекратил (%s)\n",
                           strlen(from) > 0 ? from : "?");
@@ -406,7 +407,7 @@ void Intercom::updateLED() {
                         digitalWrite(LED_PIN, LED_OFF);
                     }
                 }
-            } else if (Audio::hasRecording()) {
+            } else if (Recorder::hasRecording()) {
                 // Есть непрослушанная запись: тройная короткая вспышка каждые 2 сек
                 static uint8_t missBlinkCount = 0;
                 if (now - lastBlink > 200) {

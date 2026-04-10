@@ -1,17 +1,17 @@
 #pragma once
 /*
- * audio.h - Модуль аудио ввода/вывода через I2S
+ * audio.h - Audio I/O module via I2S
  *
- * Использует два I2S порта ESP32:
- * - I2S_NUM_0: Ввод от I2S микрофона (ICS-43434)
- * - I2S_NUM_1: Вывод на MAX98357A усилитель
+ * Uses two ESP32 I2S ports:
+ * - I2S_NUM_0: Input from I2S microphone (ICS-43434)
+ * - I2S_NUM_1: Output to MAX98357A amplifier
  *
- * Микрофон выдаёт 24-битные I2S данные в 32-битном кадре.
- * Мы извлекаем 16-битные сэмплы для передачи.
- * Динамик принимает 16-битные сэмплы напрямую.
+ * Mic outputs 24-bit I2S data in 32-bit frames.
+ * We extract 16-bit samples for transmission.
+ * Speaker accepts 16-bit samples directly.
  *
- * Генератор звуковых сигналов (tone) для уведомлений.
- * Запись последнего принятого сообщения для воспроизведения.
+ * Tone generator for notifications.
+ * Recording/playback delegated to Recorder module.
  */
 
 #include <cstdint>
@@ -19,148 +19,102 @@
 
 class Audio {
 public:
-    // Инициализация I2S портов (микрофон + динамик) + буфер записи
+    // Initialize I2S ports (mic + speaker)
     static bool init();
 
-    // Деинициализация I2S
+    // Deinitialize I2S
     static void deinit();
 
-    // Прочитать кадр аудио с микрофона
-    // Возвращает количество сэмплов (16-бит, моно)
+    // Read audio frame from microphone
+    // Returns number of samples (16-bit, mono)
     static int readFrame(int16_t* buffer, int maxSamples);
 
-    // Записать кадр аудио на динамик
-    // Возвращает количество записанных сэмплов
+    // Write audio frame to speaker
+    // Returns number of written samples
     static int writeFrame(const int16_t* buffer, int samples);
 
-    // Пропустить воспроизведение (очистить буфер)
+    // Silence speaker (clear DMA buffer)
     static void silenceSpeaker();
 
-    // Управление усилением
+    // Gain control
     static void setMicGain(uint8_t gain);     // 0-10
     static void setVolume(uint8_t volume);    // 0-10
 
-    // Получить текущие значения
+    // Get current values
     static uint8_t getMicGain();
     static uint8_t getVolume();
 
-    // Получить информацию о размерах кадров
+    // Frame size info
     static int getFrameSamples();
     static int getFrameBytes();
     static uint32_t getSampleRate();
 
-    // Переконфигурация частоты дискретизации
+    // Reconfigure sample rate
     static bool setSampleRate(uint32_t sampleRate);
 
-    // ===== Генератор звуковых сигналов =====
+    // ===== Tone generator =====
 
-    // Воспроизвести сигнал ошибки (пир не в сети) — двухтональный "ду-ду"
+    // Play error tone (peer offline) — two-tone "du-du"
     static void playErrorTone();
 
-    // Воспроизвести сигнал подтверждения (короткий бип)
+    // Play confirm tone (short beep)
     static void playConfirmTone();
 
-    // Воспроизвести сигнал отмены (собеседник отключился во время передачи)
+    // Play cancel tone (peer disconnected during transmission)
     static void playCancelTone();
 
-    // Сейчас воспроизводится тональный сигнал?
+    // Is a tone currently playing?
     static bool isTonePlaying();
 
-    // Сгенерировать следующий кадр тонального сигнала (для audioReceiveTask)
-    // Возвращает количество сэмплов, 0 если сигнал закончился
+    // Generate next tone frame (for audioReceiveTask)
+    // Returns sample count, 0 if tone finished
     static int getToneFrame(int16_t* buffer, int maxSamples);
 
-    // ===== Запись последнего сообщения =====
-
-    // Начать запись входящего аудио (вызывается при tx_on от пира)
-    static void startRecording();
-
-    // Остановить запись (вызывается при tx_off от пира)
-    static void stopRecording();
-
-    // Записать сэмплы в буфер записи (вызывается из audioReceiveTask)
-    static void recordSamples(const int16_t* samples, int count);
-
-    // Есть ли записанное сообщение?
-    static bool hasRecording();
-
-    // Длительность записи в миллисекундах
-    static uint32_t getRecordingDuration();
-
-    // Воспроизвести записанное сообщение
-    static bool startPlayback();
-
-    // Воспроизводится ли сейчас запись?
-    static bool isPlaybackActive();
-
-    // Получить следующий кадр для воспроизведения записи
-    // Возвращает количество сэмплов, 0 если воспроизведение закончилось
-    static int getPlaybackFrame(int16_t* buffer, int maxSamples);
-
-    // Очистить запись (после прослушивания или вручную)
-    static void clearRecording();
-
-    // Проверка: запись включена?
-    static bool isRecording();
-
 private:
-    static float micGainMult;   // Множитель усиления микрофона
-    static float volumeMult;    // Множитель громкости
+    static float micGainMult;   // Mic gain multiplier
+    static float volumeMult;    // Volume multiplier
     static uint32_t currentSampleRate;
     static bool initialized;
 
-    // Буфер для сырых 32-битных данных с микрофона
+    // Raw 32-bit buffer for mic data
     static const int RAW_BUF_SIZE = 1024;
     static int32_t rawMicBuffer[RAW_BUF_SIZE];
 
-    // ===== Генератор тонов (state machine) =====
+    // ===== Tone generator (state machine) =====
     enum ToneType : uint8_t {
-        TONE_NONE = 0,      // Нет сигнала
-        TONE_ERROR,         // "Ду-ду" — пир оффлайн
-        TONE_CONFIRM,       // "Бип" — подтверждение
-        TONE_CANCEL         // "Да-да-да" — отмена во время передачи
+        TONE_NONE = 0,      // No tone
+        TONE_ERROR,         // "Du-du" — peer offline
+        TONE_CONFIRM,       // "Beep" — confirm
+        TONE_CANCEL         // "Da-da-da" — cancel
     };
 
     enum TonePhase : uint8_t {
-        PHASE_OFF = 0,      // Выкл / пауза между частями
-        PHASE_BEEP,         // Тональный сигнал
-        PHASE_SILENCE       // Тихая пауза
+        PHASE_OFF = 0,      // Off / pause between parts
+        PHASE_BEEP,         // Tone signal
+        PHASE_SILENCE       // Silent pause
     };
 
-    // Параметры сигнала
+    // Tone parameters
     struct ToneStep {
-        uint16_t freq;          // Частота в Гц (0 = тишина)
-        uint16_t duration_ms;   // Длительность в мс
+        uint16_t freq;          // Frequency in Hz (0 = silence)
+        uint16_t duration_ms;   // Duration in ms
     };
 
-    static volatile ToneType toneType;      // Текущий тип сигнала
-    static TonePhase tonePhase;             // Текущая фаза
-    static uint16_t toneFreq;               // Текущая частота
-    static uint32_t tonePhaseStart;         // millis() старта фазы
-    static uint32_t toneStepIndex;          // Индекс текущего шага
-    static const ToneStep* toneSequence;    // Указатель на массив шагов
-    static uint32_t toneSequenceLen;        // Длина массива шагов
-    static uint32_t toneSamplePhase;        // Фаза для генерации синуса
-    static int16_t toneVolume;              // Громкость сигнала (0-32767)
+    static volatile ToneType toneType;
+    static TonePhase tonePhase;
+    static uint16_t toneFreq;
+    static uint32_t tonePhaseStart;
+    static uint32_t toneStepIndex;
+    static const ToneStep* toneSequence;
+    static uint32_t toneSequenceLen;
+    static uint32_t toneSamplePhase;
+    static int16_t toneVolume;
 
-    // Шаблоны сигналов
+    // Tone patterns
     static const ToneStep errorSequence[];
     static const ToneStep confirmSequence[];
     static const ToneStep cancelSequence[];
 
     static void startTone(ToneType type, const ToneStep* seq, uint32_t len);
     static void advanceTonePhase();
-
-    // ===== Буфер записи последнего сообщения =====
-    static int16_t* recBuffer;         // Динамически выделенный буфер
-    static uint32_t recBufferCapacity; // Максимальное количество сэмплов
-    static volatile uint32_t recPos;   // Текущая позиция записи
-    static volatile uint32_t recLen;   // Общая длина записи (сэмплов)
-    static volatile bool recActive;    // Идёт запись прямо сейчас
-    static bool recAvailable;          // Есть записанное сообщение для прослушивания
-    static uint32_t recStartTime;      // millis() начала записи
-
-    // Воспроизведение записи
-    static volatile uint32_t playPos;  // Текущая позиция воспроизведения
-    static volatile bool playActive;   // Идёт воспроизведение
 };
