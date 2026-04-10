@@ -172,6 +172,18 @@ const Audio::ToneStep Audio::cancelSequence[] = {
     {300,  200},
 };
 
+// Test tone — pleasant two-tone melody to verify speaker works
+const Audio::ToneStep Audio::testSequence[] = {
+    {523,  200},   // C5
+    {0,    80},
+    {659,  200},   // E5
+    {0,    80},
+    {784,  200},   // G5
+    {0,    80},
+    {1047, 400},   // C6
+    {0,    100},
+};
+
 void Audio::startTone(ToneType type, const ToneStep* seq, uint32_t len) {
     toneType = type;
     tonePhase = PHASE_BEEP;
@@ -196,6 +208,22 @@ void Audio::playConfirmTone() {
 void Audio::playCancelTone() {
     Serial.println("[AUDIO] Cancel tone: link lost");
     startTone(TONE_CANCEL, cancelSequence, sizeof(cancelSequence) / sizeof(cancelSequence[0]));
+}
+
+void Audio::playTestTone() {
+    Serial.println("[AUDIO] Test tone: speaker check");
+    startTone(TONE_TEST, testSequence, sizeof(testSequence) / sizeof(testSequence[0]));
+
+    // Play in blocking mode — spin until tone finishes
+    int16_t toneBuf[512];
+    while (isTonePlaying()) {
+        int n = getToneFrame(toneBuf, 512);
+        if (n > 0) {
+            writeFrame(toneBuf, n);
+        }
+    }
+    silenceSpeaker();
+    Serial.println("[AUDIO] Test tone done");
 }
 
 bool Audio::isTonePlaying() {

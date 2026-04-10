@@ -63,6 +63,9 @@ public:
     // Play cancel tone (peer disconnected during transmission)
     static void playCancelTone();
 
+    // Play test tone (for web UI speaker test) — plays in blocking mode
+    static void playTestTone();
+
     // Is a tone currently playing?
     static bool isTonePlaying();
 
@@ -85,7 +88,8 @@ private:
         TONE_NONE = 0,      // No tone
         TONE_ERROR,         // "Du-du" — peer offline
         TONE_CONFIRM,       // "Beep" — confirm
-        TONE_CANCEL         // "Da-da-da" — cancel
+        TONE_CANCEL,        // "Da-da-da" — cancel
+        TONE_TEST           // Test tone (speaker test from web)
     };
 
     enum TonePhase : uint8_t {
@@ -114,6 +118,7 @@ private:
     static const ToneStep errorSequence[];
     static const ToneStep confirmSequence[];
     static const ToneStep cancelSequence[];
+    static const ToneStep testSequence[];
 
     static void startTone(ToneType type, const ToneStep* seq, uint32_t len);
     static void advanceTonePhase();

@@ -205,17 +205,8 @@ void WebUI::init() {
     });
 #endif
     server->on("/api/test-audio", HTTP_POST, []() {
-        // Тестовый сигнал на динамик
-        int16_t testTone[160];
-        uint32_t phase = 0;
-        for (int i = 0; i < 160; i++) {
-            testTone[i] = (int16_t)(sin(phase * 2.0 * 3.14159 / 160.0) * 16000);
-            phase = (phase + 1) % 160;
-        }
-        for (int j = 0; j < 20; j++) {
-            Audio::writeFrame(testTone, 160);
-        }
-        Audio::silenceSpeaker();
+        // Тестовый сигнал — приятная мелодия через tone generator
+        Audio::playTestTone();
         WebUI::sendJSON(200, "{\"ok\":true,\"message\":\"Тестовый сигнал воспроизведён\"}");
     });
     server->on("/api/reboot", HTTP_POST, handleAPIReboot);
