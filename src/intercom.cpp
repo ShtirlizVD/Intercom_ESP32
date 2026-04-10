@@ -153,14 +153,26 @@ void Intercom::update() {
 // ==================== Состояние ====================
 
 void Intercom::updateState() {
-    if (pttDown && remoteTx) {
-        state = ComState::DUPLEX;
-    } else if (pttDown) {
-        state = ComState::TRANSMITTING;
-    } else if (remoteTx) {
-        state = ComState::RECEIVING;
+    if (Config::get().button_mode == BTN_MODE_PHONE) {
+        // Phone mode: always duplex when both online
+        if (remoteTx && peerOnline) {
+            state = ComState::DUPLEX;
+        } else if (peerOnline) {
+            state = ComState::TRANSMITTING;  // We're always transmitting
+        } else {
+            state = ComState::IDLE;
+        }
     } else {
-        state = ComState::IDLE;
+        // Walkie-talkie mode (PTT)
+        if (pttDown && remoteTx) {
+            state = ComState::DUPLEX;
+        } else if (pttDown) {
+            state = ComState::TRANSMITTING;
+        } else if (remoteTx) {
+            state = ComState::RECEIVING;
+        } else {
+            state = ComState::IDLE;
+        }
     }
 }
 
@@ -212,19 +224,20 @@ uint32_t Intercom::getSessionUptime() {
 // ==================== Аудио ====================
 
 bool Intercom::canTransmit() {
-    return pttDown && Config::hasRemote();
+    if (!Config::hasRemote()) return false;
+
+    // Phone mode: always transmit (full duplex)
+    if (Config::get().button_mode == BTN_MODE_PHONE) {
+        return true;
+    }
+
+    // Walkie-talkie mode: only when PTT pressed
+    return pttDown;
 }
 
 bool Intercom::shouldPlay() {
-    // Воспроизводить если собеседник активен
-    // В режиме передачи (PTT только мой) — можно мьютить динамик,
-    // чтобы не было эха от собственного голоса через собеседника
     if (remoteTx) {
-        if (pttDown) {
-            // Дуплекс: оба нажали — воспроизводим (эхо возможен, но это ожидаемо)
-            return true;
-        }
-        // Только собеседник передаёт — воспроизводим
+        // Собеседник передаёт — воспроизводим
         return true;
     }
     return false;

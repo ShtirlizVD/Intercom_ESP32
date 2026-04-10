@@ -93,6 +93,11 @@ void handlePlaybackButton() {
 }
 
 // ==================== Audio Send Task ====================
+
+// Shared VAD energy (updated by sendTask, read by receiveTask for echo gate)
+volatile int32_t g_micVadEnergy = 0;
+volatile bool g_micSpeaking = false;
+
 void audioSendTask(void* param) {
     Serial.println("[TASK] Audio send started (Core 1)");
 
@@ -101,14 +106,25 @@ void audioSendTask(void* param) {
     uint32_t frameInterval = 1000000UL / Config::get().sample_rate * FRAME_SAMPLES;
 
     while (true) {
-        if (Intercom::canTransmit()) {
-            int samplesRead = Audio::readFrame(micBuffer, FRAME_SAMPLES);
-            if (samplesRead > 0) {
-                Intercom::sendAudio(micBuffer, samplesRead);
+        int samplesRead = Audio::readFrame(micBuffer, FRAME_SAMPLES);
+
+        // VAD: compute mic energy for echo gate
+        if (samplesRead > 0) {
+            int32_t energy = 0;
+            for (int i = 0; i < samplesRead; i++) {
+                int32_t s = micBuffer[i];
+                energy += s * s;
             }
+            energy /= samplesRead;
+            // Exponential smoothing
+            int32_t prev = g_micVadEnergy;
+            g_micVadEnergy = (prev * 7 + energy) / 8;
+            g_micSpeaking = (g_micVadEnergy > 250000);
+        }
+
+        if (Intercom::canTransmit() && samplesRead > 0) {
+            Intercom::sendAudio(micBuffer, samplesRead);
             lastSendTime = micros();
-        } else {
-            Audio::readFrame(micBuffer, FRAME_SAMPLES);
         }
 
         uint32_t elapsed = micros() - lastSendTime;
@@ -128,6 +144,8 @@ void audioReceiveTask(void* param) {
     bool wasPlaying = false;
 
     while (true) {
+        bool isPhoneMode = (Config::get().button_mode == BTN_MODE_PHONE);
+
         // Priority: tones > recording playback > live audio stream
         if (Audio::isTonePlaying()) {
             int toneSamples = Audio::getToneFrame(spkBuffer, FRAME_SAMPLES);
@@ -158,6 +176,15 @@ void audioReceiveTask(void* param) {
                 if (Recorder::isRecording()) {
                     Recorder::recordSamples(spkBuffer, samplesRead);
                 }
+
+                // VAD echo gate: attenuate speaker when local voice detected
+                if (isPhoneMode && g_micSpeaking) {
+                    // Reduce to 10% volume when you're speaking
+                    for (int i = 0; i < samplesRead; i++) {
+                        spkBuffer[i] = spkBuffer[i] / 10;
+                    }
+                }
+
                 Audio::writeFrame(spkBuffer, samplesRead);
                 wasPlaying = true;
             } else {
