@@ -212,18 +212,8 @@ void Audio::playCancelTone() {
 
 void Audio::playTestTone() {
     Serial.println("[AUDIO] Test tone: speaker check");
+    // Non-blocking: just start the tone, audioReceiveTask will play it
     startTone(TONE_TEST, testSequence, sizeof(testSequence) / sizeof(testSequence[0]));
-
-    // Play in blocking mode — spin until tone finishes
-    int16_t toneBuf[512];
-    while (isTonePlaying()) {
-        int n = getToneFrame(toneBuf, 512);
-        if (n > 0) {
-            writeFrame(toneBuf, n);
-        }
-    }
-    silenceSpeaker();
-    Serial.println("[AUDIO] Test tone done");
 }
 
 bool Audio::isTonePlaying() {

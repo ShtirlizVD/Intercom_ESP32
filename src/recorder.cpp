@@ -25,7 +25,7 @@
 // RAM fallback: target 10 seconds, minimum 3 seconds
 static const uint32_t REC_TARGET_SEC = 10;
 static const uint32_t REC_MIN_SEC = 3;
-static const uint32_t REC_HEAP_RESERVE = 80000;  // Reserve 80KB for system
+static const uint32_t REC_HEAP_RESERVE = 40000;  // Reserve 40KB for system (reduced from 80KB)
 
 // SD card file
 #define SD_FILENAME "/last_msg.pcm"
@@ -222,34 +222,65 @@ void Recorder::sdDeleteFile() {
 // ==================== RAM Fallback Backend ====================
 
 bool Recorder::initRAM(uint32_t sr) {
-    uint32_t targetSamples = sr * REC_TARGET_SEC;
-    uint32_t minSamples = sr * REC_MIN_SEC;
-    uint32_t targetBytes = targetSamples * sizeof(int16_t);
-
     uint32_t freeHeap = ESP.getFreeHeap();
-    uint32_t maxBytes = (freeHeap > REC_HEAP_RESERVE) ? (freeHeap - REC_HEAP_RESERVE) : 0;
+    uint32_t freeLargest = ESP.getMaxAllocHeap();
 
-    if (maxBytes < minSamples * sizeof(int16_t)) {
+    Serial.printf("[REC] RAM init: free heap=%u KB, largest block=%u KB\n",
+                  freeHeap / 1024, freeLargest / 1024);
+
+    uint32_t maxBytes = (freeHeap > REC_HEAP_RESERVE) ? (freeHeap - REC_HEAP_RESERVE) : 0;
+    uint32_t minSamples = sr * REC_MIN_SEC;
+    uint32_t targetSamples = sr * REC_TARGET_SEC;
+
+    // Use largest free block — this is what malloc can actually allocate
+    if (freeLargest < minSamples * sizeof(int16_t)) {
         ramBuffer = nullptr;
         ramCapacity = 0;
-        Serial.printf("[REC] Not enough RAM: heap=%u KB, need min=%u KB\n",
-                      freeHeap / 1024, (minSamples * sizeof(int16_t)) / 1024);
+        Serial.printf("[REC] Not enough contiguous RAM: largest=%u KB, need min=%u KB\n",
+                      freeLargest / 1024, (minSamples * sizeof(int16_t)) / 1024);
         return false;
     }
 
-    if (targetBytes > maxBytes) {
-        targetSamples = maxBytes / sizeof(int16_t);
-        targetBytes = targetSamples * sizeof(int16_t);
-    }
+    // Constrain target to what's actually allocatable
+    uint32_t allocBytes = freeLargest - 4096;  // 4KB safety margin
+    if (allocBytes > maxBytes) allocBytes = maxBytes;
+    if (allocBytes > targetSamples * sizeof(int16_t)) allocBytes = targetSamples * sizeof(int16_t);
 
-    ramBuffer = (int16_t*)malloc(targetBytes);
+    // Try malloc; if it fails, binary-search for the largest working size
+    ramBuffer = (int16_t*)malloc(allocBytes);
     if (!ramBuffer) {
-        ramCapacity = 0;
-        Serial.println("[REC] ERROR: malloc failed for RAM buffer!");
-        return false;
+        // Binary search: find largest allocatable block
+        Serial.println("[REC] malloc failed, searching for smaller block...");
+        uint32_t lo = minSamples * sizeof(int16_t);
+        uint32_t hi = allocBytes;
+        while (lo < hi) {
+            uint32_t mid = (lo + hi) / 2;
+            int16_t* test = (int16_t*)malloc(mid);
+            if (test) {
+                free(test);
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        allocBytes = lo - sizeof(int16_t);  // back off one sample
+        if (allocBytes < minSamples * sizeof(int16_t)) {
+            ramBuffer = nullptr;
+            ramCapacity = 0;
+            Serial.println("[REC] ERROR: Cannot allocate even minimum RAM buffer!");
+            return false;
+        }
+        ramBuffer = (int16_t*)malloc(allocBytes);
+        if (!ramBuffer) {
+            ramCapacity = 0;
+            Serial.println("[REC] ERROR: Final malloc failed!");
+            return false;
+        }
     }
 
-    ramCapacity = targetSamples;
+    ramCapacity = allocBytes / sizeof(int16_t);
+    Serial.printf("[REC] Allocated RAM buffer: %u KB (%.1f sec)\n",
+                  allocBytes / 1024, (float)ramCapacity / sr);
     return true;
 }
 
