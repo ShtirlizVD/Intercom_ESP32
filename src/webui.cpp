@@ -456,10 +456,15 @@ void WebUI::handleAPISetConfig() {
         cfg.spk_volume = doc["spk_volume"].as<uint8_t>();
     }
 
-    Config::save();
+    // Apply audio settings immediately (no reboot needed)
+    if (doc["mic_gain"].is<int>()) {
+        Audio::setMicGain(cfg.mic_gain);
+    }
+    if (doc["spk_volume"].is<int>()) {
+        Audio::setVolume(cfg.spk_volume);
+    }
 
-    // Если нужно — переконфигурируем I2S
-    // (Для простоты — просто сохраняем, изменение SR требует перезагрузки)
+    Config::save();
 
     sendJSON(200, "{\"ok\":true}");
 }
