@@ -120,7 +120,7 @@
 
 // FreeRTOS
 #define AUDIO_TASK_STACK   4096
-#define NET_TASK_STACK     2048
+#define NET_TASK_STACK     4096
 
 // Ethernet (WT32-ETH01 v1.4)
 #ifdef USE_ETHERNET
