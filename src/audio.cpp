@@ -18,106 +18,6 @@ uint32_t Audio::currentSampleRate = SAMPLE_RATE;
 bool Audio::initialized = false;
 int32_t Audio::rawMicBuffer[Audio::RAW_BUF_SIZE];
 
-bool Audio::init() {
-    if (initialized) {
-        deinit();
-    }
-
-    DeviceConfig& cfg = Config::get();
-    currentSampleRate = cfg.sample_rate;
-    micGainMult = cfg.mic_gain / 5.0f;   // 5 = среднее значение → множитель 1.0
-    volumeMult = cfg.spk_volume / 10.0f;
-
-    esp_err_t err;
-
-    // ==================== I2S порт 0: Микрофон ICS-43434 (RX) ====================
-    i2s_config_t i2s_mic_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-        .sample_rate = currentSampleRate,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // ICS-43434: 24-бит в 32-бит кадре
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,    // Только левый канал
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 512,
-        .use_apll = false,
-        .tx_desc_auto_clear = false,
-        .fixed_mclk = 0
-    };
-
-    i2s_pin_config_t i2s_mic_pins = {
-        .bck_io_num = I2S_MIC_BCK,
-        .ws_io_num = I2S_MIC_WS,
-        .data_out_num = I2S_PIN_NO_CHANGE,
-        .data_in_num = I2S_MIC_DIN
-    };
-
-    err = i2s_driver_install(I2S_MIC_PORT, &i2s_mic_config, 0, NULL);
-    if (err != ESP_OK) {
-        Serial.printf("[AUDIO] Ошибка установки драйвера микрофона: %d\n", err);
-        return false;
-    }
-
-    err = i2s_set_pin(I2S_MIC_PORT, &i2s_mic_pins);
-    if (err != ESP_OK) {
-        Serial.printf("[AUDIO] Ошибка настройки пинов микрофона: %d\n", err);
-        i2s_driver_uninstall(I2S_MIC_PORT);
-        return false;
-    }
-
-    // ==================== I2S порт 1: Динамик MAX98357A (TX) ====================
-    i2s_config_t i2s_spk_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = currentSampleRate,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,  // MAX98357A работает с 16-бит
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,    // Только левый канал
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 512,
-        .use_apll = false,
-        .tx_desc_auto_clear = true,  // Автоочистка для предотвращения заикания
-        .fixed_mclk = 0
-    };
-
-    i2s_pin_config_t i2s_spk_pins = {
-        .bck_io_num = I2S_SPK_BCK,
-        .ws_io_num = I2S_SPK_WS,
-        .data_out_num = I2S_SPK_DOUT,
-        .data_in_num = I2S_PIN_NO_CHANGE
-    };
-
-    err = i2s_driver_install(I2S_SPK_PORT, &i2s_spk_config, 0, NULL);
-    if (err != ESP_OK) {
-        Serial.printf("[AUDIO] Ошибка установки драйвера динамика: %d\n", err);
-        i2s_driver_uninstall(I2S_MIC_PORT);
-        return false;
-    }
-
-    err = i2s_set_pin(I2S_SPK_PORT, &i2s_spk_pins);
-    if (err != ESP_OK) {
-        Serial.printf("[AUDIO] Ошибка настройки пинов динамика: %d\n", err);
-        i2s_driver_uninstall(I2S_MIC_PORT);
-        i2s_driver_uninstall(I2S_SPK_PORT);
-        return false;
-    }
-
-    // Очистить буфер динамика от шума
-    i2s_zero_dma_buffer(I2S_SPK_PORT);
-
-    initialized = true;
-    Serial.printf("[AUDIO] Инициализация I2S прошла успешно (SR=%u Hz)\n", currentSampleRate);
-    return true;
-}
-
-void Audio::deinit() {
-    if (!initialized) return;
-    i2s_driver_uninstall(I2S_MIC_PORT);
-    i2s_driver_uninstall(I2S_SPK_PORT);
-    initialized = false;
-    Serial.println("[AUDIO] I2S драйверы удалены");
-}
-
 int Audio::readFrame(int16_t* buffer, int maxSamples) {
     if (!initialized) return 0;
 
@@ -385,4 +285,282 @@ int Audio::getToneFrame(int16_t* buffer, int maxSamples) {
     }
 
     return samplesToGen;
+}
+
+
+// ==================== Запись последнего сообщения ====================
+
+// Статические члены буфера записи
+int16_t* Audio::recBuffer = nullptr;
+uint32_t Audio::recBufferCapacity = 0;
+volatile uint32_t Audio::recPos = 0;
+volatile uint32_t Audio::recLen = 0;
+volatile bool Audio::recActive = false;
+bool Audio::recAvailable = false;
+uint32_t Audio::recStartTime = 0;
+volatile uint32_t Audio::playPos = 0;
+volatile bool Audio::playActive = false;
+
+// Максимальные размеры буфера (пробуем уменьшать если мало heap)
+static const uint32_t REC_TARGET_SEC = 5;
+static const uint32_t REC_MIN_SEC = 2;
+
+bool Audio::init() {
+    if (initialized) {
+        deinit();
+    }
+
+    // ==================== Выделение буфера записи ====================
+    // Выделяем из heap до I2S, чтобы сначала забрать память для записи
+    uint32_t targetSamples = (uint32_t)SAMPLE_RATE * REC_TARGET_SEC;
+    uint32_t minSamples = (uint32_t)SAMPLE_RATE * REC_MIN_SEC;
+    uint32_t targetBytes = targetSamples * sizeof(int16_t);
+
+    uint32_t freeHeap = ESP.getFreeHeap();
+    // Оставляем 80KB для системы, WiFi, UDP и I2S DMA
+    uint32_t maxBytes = (freeHeap > 90000) ? (freeHeap - 80000) : 0;
+
+    if (maxBytes < minSamples * sizeof(int16_t)) {
+        // Слишком мало памяти — отключаем запись
+        recBuffer = nullptr;
+        recBufferCapacity = 0;
+        Serial.printf("[REC] Недостаточно памяти: heap=%u KB, нужно min=%u KB\n",
+                      freeHeap / 1024, (minSamples * sizeof(int16_t)) / 1024);
+    } else {
+        if (targetBytes > maxBytes) {
+            // Уменьшаем размер буфера
+            targetSamples = maxBytes / sizeof(int16_t);
+            targetBytes = targetSamples * sizeof(int16_t);
+        }
+        recBuffer = (int16_t*)malloc(targetBytes);
+        if (recBuffer) {
+            recBufferCapacity = targetSamples;
+            Serial.printf("[REC] Буфер записи: %u сэмплов (%.1f сек, %u KB)\n",
+                          targetSamples,
+                          (float)targetSamples / SAMPLE_RATE,
+                          targetBytes / 1024);
+        } else {
+            Serial.println("[REC] ОШИБКА выделения буфера записи!");
+            recBufferCapacity = 0;
+        }
+    }
+
+    DeviceConfig& cfg = Config::get();
+    currentSampleRate = cfg.sample_rate;
+    micGainMult = cfg.mic_gain / 5.0f;   // 5 = среднее значение → множитель 1.0
+    volumeMult = cfg.spk_volume / 10.0f;
+
+    esp_err_t err;
+
+    // ==================== I2S порт 0: Микрофон ICS-43434 (RX) ====================
+    i2s_config_t i2s_mic_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+        .sample_rate = currentSampleRate,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // ICS-43434: 24-бит в 32-бит кадре
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,    // Только левый канал
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 512,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t i2s_mic_pins = {
+        .bck_io_num = I2S_MIC_BCK,
+        .ws_io_num = I2S_MIC_WS,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_MIC_DIN
+    };
+
+    err = i2s_driver_install(I2S_MIC_PORT, &i2s_mic_config, 0, NULL);
+    if (err != ESP_OK) {
+        Serial.printf("[AUDIO] Ошибка установки драйвера микрофона: %d\n", err);
+        return false;
+    }
+
+    err = i2s_set_pin(I2S_MIC_PORT, &i2s_mic_pins);
+    if (err != ESP_OK) {
+        Serial.printf("[AUDIO] Ошибка настройки пинов микрофона: %d\n", err);
+        i2s_driver_uninstall(I2S_MIC_PORT);
+        return false;
+    }
+
+    // ==================== I2S порт 1: Динамик MAX98357A (TX) ====================
+    i2s_config_t i2s_spk_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = currentSampleRate,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,  // MAX98357A работает с 16-бит
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,    // Только левый канал
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 512,
+        .use_apll = false,
+        .tx_desc_auto_clear = true,  // Автоочистка для предотвращения заикания
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t i2s_spk_pins = {
+        .bck_io_num = I2S_SPK_BCK,
+        .ws_io_num = I2S_SPK_WS,
+        .data_out_num = I2S_SPK_DOUT,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+
+    err = i2s_driver_install(I2S_SPK_PORT, &i2s_spk_config, 0, NULL);
+    if (err != ESP_OK) {
+        Serial.printf("[AUDIO] Ошибка установки драйвера динамика: %d\n", err);
+        i2s_driver_uninstall(I2S_MIC_PORT);
+        return false;
+    }
+
+    err = i2s_set_pin(I2S_SPK_PORT, &i2s_spk_pins);
+    if (err != ESP_OK) {
+        Serial.printf("[AUDIO] Ошибка настройки пинов динамика: %d\n", err);
+        i2s_driver_uninstall(I2S_MIC_PORT);
+        i2s_driver_uninstall(I2S_SPK_PORT);
+        return false;
+    }
+
+    // Очистить буфер динамика от шума
+    i2s_zero_dma_buffer(I2S_SPK_PORT);
+
+    initialized = true;
+    Serial.printf("[AUDIO] Инициализация I2S прошла успешно (SR=%u Hz)\n", currentSampleRate);
+    return true;
+}
+
+void Audio::deinit() {
+    if (!initialized) return;
+    i2s_driver_uninstall(I2S_MIC_PORT);
+    i2s_driver_uninstall(I2S_SPK_PORT);
+    // Освобождаем буфер записи
+    if (recBuffer) {
+        free(recBuffer);
+        recBuffer = nullptr;
+        recBufferCapacity = 0;
+    }
+    recActive = false;
+    recAvailable = false;
+    playActive = false;
+    initialized = false;
+    Serial.println("[AUDIO] I2S драйверы удалены");
+}
+
+void Audio::startRecording() {
+    if (!recBuffer || recBufferCapacity == 0) return;
+
+    // Останавливаем воспроизведение если было
+    playActive = false;
+
+    recPos = 0;
+    recLen = 0;
+    recActive = true;
+    recAvailable = false;
+    recStartTime = millis();
+}
+
+void Audio::stopRecording() {
+    if (!recActive) return;
+    recActive = false;
+
+    if (recLen > 0) {
+        recAvailable = true;
+        uint32_t durationMs = (uint32_t)((float)recLen / currentSampleRate * 1000);
+        Serial.printf("[REC] Запись завершена: %u сэмплов (%.1f сек)\n",
+                      recLen, durationMs / 1000.0f);
+    } else {
+        Serial.println("[REC] Запись пустая (0 сэмплов)");
+    }
+}
+
+void Audio::recordSamples(const int16_t* samples, int count) {
+    if (!recActive || !recBuffer || count <= 0) return;
+
+    // Копируем сэмплы в буфер (кольцевой — если не хватает места,
+    // перезаписываем начало, сохраняя последние N секунд)
+    for (int i = 0; i < count; i++) {
+        recBuffer[recPos % recBufferCapacity] = samples[i];
+        recPos++;
+    }
+
+    // recLen = минимум из (всего записанного, размер буфера)
+    // В кольцевом буфере хранятся только последние recBufferCapacity сэмплов
+    if (recPos > recBufferCapacity) {
+        recLen = recBufferCapacity;
+    } else {
+        recLen = recPos;
+    }
+}
+
+bool Audio::hasRecording() {
+    return recAvailable && recLen > 0;
+}
+
+uint32_t Audio::getRecordingDuration() {
+    if (!recAvailable || recLen == 0) return 0;
+    return (uint32_t)((float)recLen / currentSampleRate * 1000);
+}
+
+bool Audio::isRecording() {
+    return recActive;
+}
+
+bool Audio::startPlayback() {
+    if (!recAvailable || !recBuffer || recLen == 0) return false;
+    if (playActive) return false;  // Уже воспроизводится
+
+    // Вычисляем откуда читать: в кольцевом буфере самые старые данные
+    // находятся в позиции (recPos - recLen) % recBufferCapacity
+    playPos = (recPos >= recLen) ? (recPos - recLen) : 0;
+    playActive = true;
+    Serial.printf("[REC] Воспроизведение: %u сэмплов (%.1f сек)\n",
+                  recLen, (float)recLen / currentSampleRate);
+    return true;
+}
+
+bool Audio::isPlaybackActive() {
+    return playActive;
+}
+
+int Audio::getPlaybackFrame(int16_t* buffer, int maxSamples) {
+    if (!playActive || !recBuffer) return 0;
+
+    // Сколько сэмплов осталось
+    uint32_t samplesLeft = recLen - (playPos - ((recPos >= recLen) ? (recPos - recLen) : 0));
+    if (samplesLeft <= 0) {
+        playActive = false;
+        return 0;
+    }
+
+    int samplesToRead = min(maxSamples, (int)samplesLeft);
+
+    // Читаем из кольцевого буфера
+    uint32_t startOffset = (recPos >= recLen) ? (recPos - recLen) : 0;
+    uint32_t currentReadPos = startOffset + (playPos - startOffset);
+
+    for (int i = 0; i < samplesToRead; i++) {
+        uint32_t idx = (currentReadPos + i) % recBufferCapacity;
+        buffer[i] = recBuffer[idx];
+    }
+
+    playPos += samplesToRead;
+
+    // Проверяем окончание
+    if ((uint32_t)(playPos - ((recPos >= recLen) ? (recPos - recLen) : 0)) >= recLen) {
+        playActive = false;
+    }
+
+    return samplesToRead;
+}
+
+void Audio::clearRecording() {
+    recAvailable = false;
+    recLen = 0;
+    recPos = 0;
+    playActive = false;
+    playPos = 0;
+    Serial.println("[REC] Запись очищена");
 }

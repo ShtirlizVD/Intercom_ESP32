@@ -10,8 +10,8 @@
  * Мы извлекаем 16-битные сэмплы для передачи.
  * Динамик принимает 16-битные сэмплы напрямую.
  *
- * Также содержит генератор звуковых сигналов (tone) для
- * уведомлений: сигнал ошибки при недоступности пира.
+ * Генератор звуковых сигналов (tone) для уведомлений.
+ * Запись последнего принятого сообщения для воспроизведения.
  */
 
 #include <cstdint>
@@ -19,7 +19,7 @@
 
 class Audio {
 public:
-    // Инициализация I2S портов (микрофон + динамик)
+    // Инициализация I2S портов (микрофон + динамик) + буфер записи
     static bool init();
 
     // Деинициализация I2S
@@ -70,6 +70,39 @@ public:
     // Возвращает количество сэмплов, 0 если сигнал закончился
     static int getToneFrame(int16_t* buffer, int maxSamples);
 
+    // ===== Запись последнего сообщения =====
+
+    // Начать запись входящего аудио (вызывается при tx_on от пира)
+    static void startRecording();
+
+    // Остановить запись (вызывается при tx_off от пира)
+    static void stopRecording();
+
+    // Записать сэмплы в буфер записи (вызывается из audioReceiveTask)
+    static void recordSamples(const int16_t* samples, int count);
+
+    // Есть ли записанное сообщение?
+    static bool hasRecording();
+
+    // Длительность записи в миллисекундах
+    static uint32_t getRecordingDuration();
+
+    // Воспроизвести записанное сообщение
+    static bool startPlayback();
+
+    // Воспроизводится ли сейчас запись?
+    static bool isPlaybackActive();
+
+    // Получить следующий кадр для воспроизведения записи
+    // Возвращает количество сэмплов, 0 если воспроизведение закончилось
+    static int getPlaybackFrame(int16_t* buffer, int maxSamples);
+
+    // Очистить запись (после прослушивания или вручную)
+    static void clearRecording();
+
+    // Проверка: запись включена?
+    static bool isRecording();
+
 private:
     static float micGainMult;   // Множитель усиления микрофона
     static float volumeMult;    // Множитель громкости
@@ -117,4 +150,17 @@ private:
 
     static void startTone(ToneType type, const ToneStep* seq, uint32_t len);
     static void advanceTonePhase();
+
+    // ===== Буфер записи последнего сообщения =====
+    static int16_t* recBuffer;         // Динамически выделенный буфер
+    static uint32_t recBufferCapacity; // Максимальное количество сэмплов
+    static volatile uint32_t recPos;   // Текущая позиция записи
+    static volatile uint32_t recLen;   // Общая длина записи (сэмплов)
+    static volatile bool recActive;    // Идёт запись прямо сейчас
+    static bool recAvailable;          // Есть записанное сообщение для прослушивания
+    static uint32_t recStartTime;      // millis() начала записи
+
+    // Воспроизведение записи
+    static volatile uint32_t playPos;  // Текущая позиция воспроизведения
+    static volatile bool playActive;   // Идёт воспроизведение
 };

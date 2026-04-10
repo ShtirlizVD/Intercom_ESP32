@@ -316,6 +316,8 @@ void Intercom::processCtrlPacket() {
         peerOnline = true;
         lastPongReceived = millis();
         updateState();
+        // Начинаем запись входящего сообщения
+        Audio::startRecording();
         Serial.printf("[INTERCOM] 📻 Собеседник передаёт (%s)\n",
                       strlen(from) > 0 ? from : "?");
     }
@@ -323,6 +325,8 @@ void Intercom::processCtrlPacket() {
         // Собеседник прекратил передачу
         if (remoteTx) {
             remoteTx = false;
+            // Останавливаем запись — сообщение сохранено для воспроизведения
+            Audio::stopRecording();
             updateState();
             Serial.printf("[INTERCOM] 🔇 Собеседник прекратил (%s)\n",
                           strlen(from) > 0 ? from : "?");
@@ -393,6 +397,25 @@ void Intercom::updateLED() {
                             blinkCount = 0;
                             // Длинная пауза после двойной вспышки
                             lastBlink = now + 1700;
+                        } else {
+                            ledState = true;
+                            digitalWrite(LED_PIN, LED_ON);
+                        }
+                    } else {
+                        ledState = false;
+                        digitalWrite(LED_PIN, LED_OFF);
+                    }
+                }
+            } else if (Audio::hasRecording()) {
+                // Есть непрослушанная запись: тройная короткая вспышка каждые 2 сек
+                static uint8_t missBlinkCount = 0;
+                if (now - lastBlink > 200) {
+                    lastBlink = now;
+                    if (!ledState) {
+                        missBlinkCount++;
+                        if (missBlinkCount > 3) {
+                            missBlinkCount = 0;
+                            lastBlink = now + 1400;
                         } else {
                             ledState = true;
                             digitalWrite(LED_PIN, LED_ON);

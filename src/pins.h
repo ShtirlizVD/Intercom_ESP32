@@ -64,6 +64,10 @@
 #define BUTTON_PIN         14
 #define BUTTON_DEBOUNCE_MS 50
 
+// Кнопка воспроизведения последнего сообщения
+#define PLAYBACK_PIN       4
+#define PLAYBACK_DEBOUNCE_MS 50
+
 // LED
 #define LED_PIN            2
 #define LED_ON             LOW
@@ -87,6 +91,10 @@
 // Кнопка PTT
 #define BUTTON_PIN         4
 #define BUTTON_DEBOUNCE_MS 50
+
+// Кнопка воспроизведения последнего сообщения
+#define PLAYBACK_PIN       13
+#define PLAYBACK_DEBOUNCE_MS 50
 
 // LED
 #define LED_PIN            2

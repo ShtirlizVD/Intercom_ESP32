@@ -1,10 +1,11 @@
 /*
- * main.cpp - ESP32 Intercom firmware v2.2
+ * main.cpp - ESP32 Intercom firmware v2.3
  *
  * Режим рации (Walkie-Talkie):
  *   - Нажал кнопку → речь СРАЗУ передаётся
  *   - Отпустил → передача прекращается, слушаешь
  *   - Оба нажали → полнодуплекс
+ *   - Пропущенное сообщение → LED мигает, кнопка воспроизведения
  *
  * Две сборки:
  *   USE_WIFI     — ESP32 DevKit + WiFi (дом)
@@ -32,7 +33,7 @@ static bool ethConnected = false;
 #include <WiFi.h>
 #endif
 
-// ==================== Кнопка ====================
+// ==================== Кнопка PTT ====================
 static volatile bool buttonEvent = false;
 static volatile uint32_t buttonEventTime = 0;
 static bool buttonHeld = false;
@@ -52,6 +53,8 @@ void handleButton() {
         bool isDown = (digitalRead(BUTTON_PIN) == LOW);
         if (isDown && !buttonHeld) {
             buttonHeld = true;
+            // Если есть непрослушанная запись — очищаем при нажатии PTT
+            Audio::clearRecording();
             Serial.println("[BTN] ▶ Нажата — передаю");
             Intercom::pttPress();
         } else if (!isDown && buttonHeld) {
@@ -60,6 +63,32 @@ void handleButton() {
             Intercom::pttRelease();
         }
     }
+}
+
+// ==================== Кнопка воспроизведения ====================
+static bool playbackLastState = HIGH;
+static uint32_t playbackDebounceTime = 0;
+
+void handlePlaybackButton() {
+    uint32_t now = millis();
+    if (now - playbackDebounceTime < PLAYBACK_DEBOUNCE_MS) return;
+
+    bool state = digitalRead(PLAYBACK_PIN);
+    if (state == LOW && playbackLastState == HIGH) {
+        playbackDebounceTime = now;
+        // Кнопка нажата
+        if (Audio::hasRecording()) {
+            if (!Audio::isPlaybackActive()) {
+                Audio::startPlayback();
+                Serial.printf("[BTN] 🔊 Воспроизведение (%u мс)\n",
+                              Audio::getRecordingDuration());
+            }
+        } else {
+            // Нет записи — короткий сигнал
+            Serial.println("[BTN] Нет записи для воспроизведения");
+        }
+    }
+    playbackLastState = state;
 }
 
 // ==================== Задача: Отправка аудио ====================
@@ -98,20 +127,36 @@ void audioReceiveTask(void* param) {
     bool wasPlaying = false;
 
     while (true) {
-        // Приоритет: тональные сигналы (ошибка, отмена) > входящий аудио-поток
+        // Приоритет: тональные сигналы > воспроизведение записи > входящий аудио-поток
         if (Audio::isTonePlaying()) {
             int toneSamples = Audio::getToneFrame(spkBuffer, FRAME_SAMPLES);
             if (toneSamples > 0) {
                 Audio::writeFrame(spkBuffer, toneSamples);
                 wasPlaying = true;
             } else {
-                // Сигнал завершился
                 wasPlaying = false;
                 Audio::silenceSpeaker();
+            }
+        } else if (Audio::isPlaybackActive()) {
+            // Воспроизведение записанного сообщения
+            int pbSamples = Audio::getPlaybackFrame(spkBuffer, FRAME_SAMPLES);
+            if (pbSamples > 0) {
+                Audio::writeFrame(spkBuffer, pbSamples);
+                wasPlaying = true;
+            } else {
+                // Воспроизведение завершено — очистить запись
+                Audio::clearRecording();
+                Audio::silenceSpeaker();
+                wasPlaying = false;
+                Serial.println("[TASK] Воспроизведение завершено");
             }
         } else if (Intercom::shouldPlay()) {
             int samplesRead = Intercom::receiveAudio(spkBuffer, FRAME_SAMPLES);
             if (samplesRead > 0) {
+                // Параллельно записываем в буфер
+                if (Audio::isRecording()) {
+                    Audio::recordSamples(spkBuffer, samplesRead);
+                }
                 Audio::writeFrame(spkBuffer, samplesRead);
                 wasPlaying = true;
             } else {
@@ -135,23 +180,26 @@ void networkTask(void* param) {
         Intercom::update();
         WebUI::handleClient();
         handleButton();
+        handlePlaybackButton();
 
         // Статус каждые 30 сек
         static uint32_t lastStatus = 0;
         if (millis() - lastStatus > 30000) {
             lastStatus = millis();
 #ifdef USE_ETHERNET
-            Serial.printf("[STATUS] ETH: %s | Рация: %s | Peer: %s | Heap: %d KB\n",
+            Serial.printf("[STATUS] ETH: %s | Рация: %s | Peer: %s | Heap: %d KB | Rec: %s\n",
                           ethConnected ? ETH.localIP().toString().c_str() : "нет",
                           Intercom::getStateName(),
                           Intercom::remoteActive() ? "ON" : "OFF",
-                          ESP.getFreeHeap() / 1024);
+                          ESP.getFreeHeap() / 1024,
+                          Audio::hasRecording() ? "YES" : "no");
 #else
-            Serial.printf("[STATUS] WiFi: %s | Рация: %s | Peer: %s | Heap: %d KB\n",
+            Serial.printf("[STATUS] WiFi: %s | Рация: %s | Peer: %s | Heap: %d KB | Rec: %s\n",
                           WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "нет",
                           Intercom::getStateName(),
                           Intercom::remoteActive() ? "ON" : "OFF",
-                          ESP.getFreeHeap() / 1024);
+                          ESP.getFreeHeap() / 1024,
+                          Audio::hasRecording() ? "YES" : "no");
 #endif
         }
 
@@ -230,7 +278,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n\n========================================");
-    Serial.println("   ESP32 Intercom v2.2");
+    Serial.println("   ESP32 Intercom v2.3");
     Serial.println("   Режим рации (Walkie-Talkie)");
 #ifdef USE_ETHERNET
     Serial.println("   WT32-ETH01 + Ethernet");
@@ -239,6 +287,7 @@ void setup() {
 #endif
     Serial.println("   Микрофон: ICS-43434 (24-бит)");
     Serial.println("   Динамик:  MAX98357A");
+    Serial.println("   Запись последнего сообщения");
     Serial.println("========================================\n");
 
     // 1. Файловая система
@@ -262,8 +311,9 @@ void setup() {
     digitalWrite(LED_PIN, LED_OFF);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, CHANGE);
+    pinMode(PLAYBACK_PIN, INPUT_PULLUP);
 
-    Serial.printf("[GPIO] LED=%d | Кнопка=%d\n", LED_PIN, BUTTON_PIN);
+    Serial.printf("[GPIO] LED=%d | PTT=%d | Playback=%d\n", LED_PIN, BUTTON_PIN, PLAYBACK_PIN);
     Serial.printf("[I2S]  Mic: BCK=%d WS=%d DIN=%d\n", I2S_MIC_BCK, I2S_MIC_WS, I2S_MIC_DIN);
     Serial.printf("[I2S]  Spk: BCK=%d WS=%d DOUT=%d\n", I2S_SPK_BCK, I2S_SPK_WS, I2S_SPK_DOUT);
 
