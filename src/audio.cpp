@@ -56,14 +56,11 @@ int Audio::writeFrame(const int16_t* buffer, int samples) {
     if (!initialized || samples <= 0) return 0;
 
     int16_t volBuffer[samples];  // VLA
-    int peak = 0;
     for (int i = 0; i < samples; i++) {
         float scaled = (float)buffer[i] * volumeMult;
         if (scaled > 32767.0f) scaled = 32767.0f;
         if (scaled < -32768.0f) scaled = -32768.0f;
         volBuffer[i] = (int16_t)scaled;
-        int abs_v = scaled > 0 ? (int)scaled : -(int)scaled;
-        if (abs_v > peak) peak = abs_v;
     }
 
     size_t bytesWritten = 0;
