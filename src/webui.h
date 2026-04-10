@@ -8,7 +8,9 @@
  */
 
 #include <WebServer.h>
+#ifdef USE_WIFI
 #include <DNSServer.h>
+#endif
 
 #ifdef USE_ETHERNET
 #include <ETH.h>

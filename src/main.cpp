@@ -23,7 +23,7 @@
 #include "audio.h"
 #include "intercom.h"
 #include "webui.h"
-#include <LITTLEFS.h>
+#include <LittleFS.h>
 
 #ifdef USE_ETHERNET
 #include <ETH.h>
@@ -242,11 +242,11 @@ void setup() {
     Serial.println("========================================\n");
 
     // 1. Файловая система
-    if (!LITTLEFS.begin(true)) {
-        Serial.println("[FS] Ошибка LITTLEFS");
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Ошибка LittleFS");
     } else {
-        Serial.println("[FS] LITTLEFS OK");
-        if (LITTLEFS.exists("/index.html")) {
+        Serial.println("[FS] LittleFS OK");
+        if (LittleFS.exists("/index.html")) {
             Serial.println("[FS] /index.html найден");
         } else {
             Serial.println("[FS] /index.html не найден (встроенный)");

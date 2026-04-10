@@ -11,7 +11,7 @@
 #include "audio.h"
 #include "pins.h"
 #include <ArduinoJson.h>
-#include <LITTLEFS.h>
+#include <LittleFS.h>
 #ifdef USE_WIFI
 #include <WiFi.h>
 #endif
@@ -198,12 +198,12 @@ void WebUI::init() {
 #ifdef USE_WIFI
     server->on("/api/wifi/scan", HTTP_POST, handleAPIWiFiScan);
     server->on("/api/wifi/connect", HTTP_POST, handleAPIWiFiConnect);
-    server->on("/api/wifi/disconnect", HTTP_POST, [](WebServer& s) {
+    server->on("/api/wifi/disconnect", HTTP_POST, []() {
         WiFi.disconnect(true);
         WebUI::sendJSON(200, "{\"ok\":true}");
     });
 #endif
-    server->on("/api/test-audio", HTTP_POST, [](WebServer& s) {
+    server->on("/api/test-audio", HTTP_POST, []() {
         // Тестовый сигнал на динамик
         int16_t testTone[160];
         uint32_t phase = 0;
@@ -331,8 +331,8 @@ void WebUI::handleRoot() {
 
 void WebUI::handleIndexHTML() {
     // Пытаемся загрузить из LittleFS
-    if (LITTLEFS.exists("/index.html")) {
-        File f = LITTLEFS.open("/index.html", "r");
+    if (LittleFS.exists("/index.html")) {
+        File f = LittleFS.open("/index.html", "r");
         server->streamFile(f, "text/html");
         f.close();
     } else {
@@ -379,7 +379,7 @@ void WebUI::handleAPIStatus() {
     doc["am_transmitting"] = Intercom::amTransmitting();
     doc["remote_active"] = Intercom::remoteActive();
     doc["is_duplex"] = Intercom::isDuplex();
-    doc["peer_online"] = Intercom::remoteActive();
+    doc["peer_online"] = Intercom::isPeerOnline();
     doc["tx_duration_sec"] = Intercom::getTxDuration() / 1000;
 
     String output;
@@ -423,37 +423,37 @@ void WebUI::handleAPISetConfig() {
     DeviceConfig& cfg = Config::get();
 
     // Устройство
-    if (doc.containsKey("device_name")) {
+    if (doc["device_name"].is<const char*>()) {
         String name = doc["device_name"].as<String>();
         strncpy(cfg.device_name, name.c_str(), MAX_NAME_LEN);
     }
 
     // Режим кнопки (в режиме рации — не используется, но сохраняем для совместимости)
-    if (doc.containsKey("button_mode")) {
+    if (doc["button_mode"].is<int>()) {
         cfg.button_mode = (ButtonMode)doc["button_mode"].as<int>();
     }
 
     // Интерком
-    if (doc.containsKey("remote_ip")) {
+    if (doc["remote_ip"].is<const char*>()) {
         String rip = doc["remote_ip"].as<String>();
         strncpy(cfg.remote_ip, rip.c_str(), MAX_IP_LEN);
         cfg.remote_configured = (strlen(cfg.remote_ip) > 0);
     }
-    if (doc.containsKey("ctrl_port")) {
+    if (doc["ctrl_port"].is<int>()) {
         cfg.ctrl_port = doc["ctrl_port"].as<uint16_t>();
     }
-    if (doc.containsKey("audio_port")) {
+    if (doc["audio_port"].is<int>()) {
         cfg.audio_port = doc["audio_port"].as<uint16_t>();
     }
 
     // Аудио
-    if (doc.containsKey("sample_rate")) {
+    if (doc["sample_rate"].is<int>()) {
         cfg.sample_rate = doc["sample_rate"].as<uint32_t>();
     }
-    if (doc.containsKey("mic_gain")) {
+    if (doc["mic_gain"].is<int>()) {
         cfg.mic_gain = doc["mic_gain"].as<uint8_t>();
     }
-    if (doc.containsKey("spk_volume")) {
+    if (doc["spk_volume"].is<int>()) {
         cfg.spk_volume = doc["spk_volume"].as<uint8_t>();
     }
 
@@ -502,13 +502,13 @@ void WebUI::handleAPIWiFiConnect() {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, server->arg("plain"));
 
-    if (err || !doc.containsKey("ssid")) {
+    if (err || !doc["ssid"].is<const char*>()) {
         sendJSON(400, "{\"error\":\"SSID required\"}");
         return;
     }
 
     String ssid = doc["ssid"].as<String>();
-    String password = doc.containsKey("password") ? doc["password"].as<String>() : "";
+    String password = doc["password"].is<const char*>() ? doc["password"].as<String>() : "";
 
     Config::setWiFi(ssid.c_str(), password.c_str());
 
