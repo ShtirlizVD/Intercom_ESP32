@@ -277,19 +277,21 @@ int Audio::getToneFrame(int16_t* buffer, int maxSamples) {
         uint32_t phaseInc = ((uint32_t)freq << 16) / currentSampleRate;
 
         for (int i = 0; i < samplesToGen; i++) {
-            uint16_t phase = (uint16_t)(toneSamplePhase >> 16);
-            int32_t val;
-            uint8_t p8 = phase >> 8;
-            if (p8 < 64) {
-                val = p8 * 4;
-            } else if (p8 < 128) {
-                val = 511 - p8 * 4;
-            } else if (p8 < 192) {
-                val = -(p8 * 4 - 767);
+            // Use upper 16 bits as phase (0-65535)
+            uint32_t phase = toneSamplePhase >> 16;
+
+            // Triangle wave: ramp up 0->32767, ramp down 32767->0
+            int32_t triangle;
+            if (phase < 32768) {
+                triangle = (int32_t)phase;              // 0 to 32767
             } else {
-                val = p8 * 4 - 1023;
+                triangle = (int32_t)(65536 - phase);   // 32767 to 0
             }
-            buffer[i] = (int16_t)((int32_t)val * toneVolume / 256);
+            // Scale to -32767..+32767
+            triangle = triangle * 2 - 32767;
+
+            // Apply tone volume (20000 / 32767 ≈ 0.61)
+            buffer[i] = (int16_t)((int32_t)triangle * toneVolume / 32767);
             toneSamplePhase += phaseInc;
         }
     }
