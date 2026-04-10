@@ -1,0 +1,22 @@
+{
+    "pc_name": "PC",
+    "sample_rate": 16000,
+    "local_ctrl_port": 8080,
+    "local_audio_port": 8081,
+    "intercoms": [
+        {
+            "name": "Garage",
+            "ip": "192.168.1.100",
+            "ctrl_port": 8080,
+            "audio_port": 8081,
+            "key": "space"
+        },
+        {
+            "name": "Home",
+            "ip": "192.168.1.101",
+            "ctrl_port": 8080,
+            "audio_port": 8081,
+            "key": "enter"
+        }
+    ]
+}
