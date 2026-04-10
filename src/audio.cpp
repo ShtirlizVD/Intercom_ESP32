@@ -56,17 +56,26 @@ int Audio::writeFrame(const int16_t* buffer, int samples) {
     if (!initialized || samples <= 0) return 0;
 
     int16_t volBuffer[samples];  // VLA
+    int peak = 0;
     for (int i = 0; i < samples; i++) {
         float scaled = (float)buffer[i] * volumeMult;
         if (scaled > 32767.0f) scaled = 32767.0f;
         if (scaled < -32768.0f) scaled = -32768.0f;
         volBuffer[i] = (int16_t)scaled;
+        int abs_v = scaled > 0 ? (int)scaled : -(int)scaled;
+        if (abs_v > peak) peak = abs_v;
     }
 
     size_t bytesWritten = 0;
     esp_err_t err = i2s_write(I2S_SPK_PORT, volBuffer,
                                samples * sizeof(int16_t),
                                &bytesWritten, pdMS_TO_TICKS(100));
+
+    static uint32_t writeDbgCount = 0;
+    if ((writeDbgCount++ % 100) == 0) {
+        Serial.printf("[AUDIO] writeFrame: %d samples, peak=%d, written=%u, err=%d\n",
+                      samples, peak, bytesWritten, (int)err);
+    }
 
     if (err != ESP_OK) {
         return 0;
@@ -211,7 +220,9 @@ void Audio::playCancelTone() {
 }
 
 void Audio::playTestTone() {
-    Serial.println("[AUDIO] Test tone: speaker check");
+    Serial.println("[AUDIO] Test tone: speaker check (starting)");
+    Serial.printf("[AUDIO] I2S speaker port=%d initialized=%d vol=%.2f\n",
+                  I2S_SPK_PORT, (int)initialized, volumeMult);
     // Non-blocking: just start the tone, audioReceiveTask will play it
     startTone(TONE_TEST, testSequence, sizeof(testSequence) / sizeof(testSequence[0]));
 }
@@ -236,6 +247,12 @@ void Audio::advanceTonePhase() {
 
 int Audio::getToneFrame(int16_t* buffer, int maxSamples) {
     if (toneType == TONE_NONE) return 0;
+
+    static uint32_t dbgCount = 0;
+    if ((dbgCount++ % 50) == 0) {
+        Serial.printf("[AUDIO] tone playing: type=%d step=%u/%u freq=%u\n",
+                      (int)toneType, toneStepIndex, toneSequenceLen, toneFreq);
+    }
 
     uint32_t now = millis();
     uint32_t stepDuration = toneSequence[toneStepIndex].duration_ms;
