@@ -71,14 +71,11 @@ bool Recorder::init(uint32_t sr) {
     Serial.println("[REC] SD not available, trying RAM...");
 #endif
 
-    if (initRAM(sr)) {
-        storage = STORE_RAM;
-        Serial.printf("[REC] Storage: RAM (%.1f sec)\n", (float)ramCapacity / sr);
-        return true;
-    }
+    // RAM fallback disabled — too expensive on standard ESP32
+    // Recording requires SD card (-DUSE_SD build flag)
+    Serial.println("[REC] No SD card — recording disabled (need -DUSE_SD build)");
 
     storage = STORE_NONE;
-    Serial.println("[REC] WARNING: No storage available for recording!");
     return false;
 }
 
