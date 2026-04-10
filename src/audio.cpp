@@ -71,12 +71,6 @@ int Audio::writeFrame(const int16_t* buffer, int samples) {
                                samples * sizeof(int16_t),
                                &bytesWritten, pdMS_TO_TICKS(100));
 
-    static uint32_t writeDbgCount = 0;
-    if ((writeDbgCount++ % 100) == 0) {
-        Serial.printf("[AUDIO] writeFrame: %d samples, peak=%d, written=%u, err=%d\n",
-                      samples, peak, bytesWritten, (int)err);
-    }
-
     if (err != ESP_OK) {
         return 0;
     }
@@ -220,11 +214,27 @@ void Audio::playCancelTone() {
 }
 
 void Audio::playTestTone() {
-    Serial.println("[AUDIO] Test tone: speaker check (starting)");
-    Serial.printf("[AUDIO] I2S speaker port=%d initialized=%d vol=%.2f\n",
-                  I2S_SPK_PORT, (int)initialized, volumeMult);
-    // Non-blocking: just start the tone, audioReceiveTask will play it
-    startTone(TONE_TEST, testSequence, sizeof(testSequence) / sizeof(testSequence[0]));
+    Serial.println("[AUDIO] Test tone: pure sine 440Hz");
+
+    // Generate a clean sine wave in real-time with delay() for sync
+    // This runs in networkTask context (Core 0) but delay() yields to WiFi
+    int16_t buf[320];
+    float phase = 0.0f;
+    float phaseInc = 440.0f * 2.0f * 3.14159265f / (float)currentSampleRate;
+
+    // Play ~1 second of sine wave
+    for (int block = 0; block < 50; block++) {
+        for (int i = 0; i < 320; i++) {
+            buf[i] = (int16_t)(sin(phase) * 20000.0f);
+            phase += phaseInc;
+            if (phase > 6.2831853f) phase -= 6.2831853f;
+        }
+        writeFrame(buf, 320);
+        delay(19);  // ~20ms per block = real-time sync with 16kHz
+    }
+
+    silenceSpeaker();
+    Serial.println("[AUDIO] Test tone done");
 }
 
 bool Audio::isTonePlaying() {
@@ -247,12 +257,6 @@ void Audio::advanceTonePhase() {
 
 int Audio::getToneFrame(int16_t* buffer, int maxSamples) {
     if (toneType == TONE_NONE) return 0;
-
-    static uint32_t dbgCount = 0;
-    if ((dbgCount++ % 50) == 0) {
-        Serial.printf("[AUDIO] tone playing: type=%d step=%u/%u freq=%u\n",
-                      (int)toneType, toneStepIndex, toneSequenceLen, toneFreq);
-    }
 
     uint32_t now = millis();
     uint32_t stepDuration = toneSequence[toneStepIndex].duration_ms;
